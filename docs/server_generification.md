@@ -379,10 +379,15 @@ M1–M3 can proceed in parallel per engine once M1 lands; M4 only needs M2 to st
 
 **Open questions (need owner decision at M0)**
 - **Q1.** Core vocabulary: confirm `text` / `audio_base64` / `language` / `seed` as the agreed `group: common` set (does any engine use a different *name* for its reference-audio field today? If so, we standardize names at M2–M3 — a one-time breaking change to those servers, acceptable since the app is the only client).
+  - **Answer**: the proposed set of common fields looks insufficient. Most voice cloners (not all) require a `reference_text`. I think that should be included and marked as optional
 - **Q2.** Where does `tts-engine-common` live? Private git repo (recommended — installable by path/git ref from each server venv) vs. a folder inside one repo others depend on.
-- **Q3.** Stable engine slugs: `chatterbox`, `omnivoice`, `qwen3-tts`, `????` (name the 4th).
-- **Q4.** 4th engine's actual parameter surface — needed to sanity-check that every shape in §4.2 is expressible (e.g. if it has a `string`-without-enum param or a `boolean`, we're covered; if it has something weirder, the escape hatch absorbs it).
+  - **Answer**: this repo (tts-serve) has been created to house both the tts-engine-common and all the implementations of it.
+- **Q3.** Stable engine slugs: `dots.ttx`, `omnivoice`, and `qwen3-tts` implementations have all been tested and work with the app. `chatterbox` was a very recent addition and is not yet tested. (Chatterbox was in fact the motivation to finally standardize this). Is the `chatterbox` implementation salvageable?
+  - **Answer**: Likely, none of the current implementations are salvageable - this work might involve a ground-up rewrite of all of them.
+- **Q4.** chatterbox's actual parameter surface — need to sanity-check that every shape in §4.2 is expressible (e.g. if it has a `string`-without-enum param or a `boolean`, we're covered; if it has something weirder, the escape hatch absorbs it).
+  - **Answer**: we can learn this during implementation, and adjust the current chatterbox script (or rewrite it entirely) as needed.
 - **Q5.** Do we want `Cache-Control` on `/capabilities` (proposed: `max-age=300`), and does the app ever run against multiple *versions* of the same engine slug simultaneously (affects profile-cache keying — proposed key: `engine + schema_version`)?
+  - **Answer**: no cache-control for now. App will interrogate `/capabilities` on each initial connection. Also: our assumption is that the application will never run against multiple versions simultaneously.
 
 ## 11. Verification Checklist (GPU server, per engine)
 
