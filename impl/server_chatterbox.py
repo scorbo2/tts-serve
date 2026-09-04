@@ -3,11 +3,17 @@ FastAPI REST server for Chatterbox Multilingual voice cloning.
 
 Loads the model once on startup, then exposes a single POST endpoint for
 synthesis.  Clients send text plus a reference audio sample (base64); the
-server returns the generated audio as base64-encoded 24 kHz WAV.  All
-output is PerTh-watermarked by the library itself.
+server returns the generated audio as base64-encoded 24 kHz WAV.  All output
+is PerTh-watermarked by the library itself.
 
-Unlike OmniVoice, Chatterbox conditions purely on the reference audio --
-there is no transcript-of-the-reference field in the request schema.
+Unlike most tts-serve engines, Chatterbox conditions purely on the reference
+audio -- there is no transcript-of-the-reference field in the request schema,
+so the `reference_text` core field is deliberately absent from this server.
+
+Capabilities: GET /capabilities returns a machine-readable description of
+every request parameter, derived from the Pydantic request model so it can
+never drift from what the server actually validates (see the
+tts-engine-common README).
 
 Model weights are downloaded from HuggingFace (ResembleAI/chatterbox) on
 first start.  Set HF_TOKEN in the environment if your checkpoint needs it.
@@ -24,7 +30,8 @@ Configuration (environment variables):
                          Default: 8000
 
 Extra dependencies beyond the chatterbox-tts package:
-    pip install fastapi uvicorn loguru
+    pip install fastapi uvicorn loguru soundfile
+    pip install tts-engine-common    # or: pip install -e ../tts-engine-common
 
 Usage:
     python server_chatterbox.py
@@ -35,7 +42,6 @@ from __future__ import annotations
 
 import base64
 import io
-import math
 import os
 import random
 import threading
@@ -52,12 +58,20 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from chatterbox.mtl_tts import (
     MULTILINGUAL_T3_MODELS,
+    S3GEN_SR,
     SUPPORTED_LANGUAGES,
     ChatterboxMultilingualTTS,
+)
+from tts_engine_common import (
+    CoreSynthesisResponse,
+    build_capabilities,
+    capabilities_endpoint,
+    compute_rtf,
+    decode_base64,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,15 +100,6 @@ def _validate_config() -> None:
 
 _validate_config()
 
-# Defaults mirror ChatterboxMultilingualTTS.generate() and the README's
-# "Tips and Tricks" (the recommended general-use settings).
-DEFAULT_EXAGGERATION = 0.5
-DEFAULT_CFG_WEIGHT = 0.5
-DEFAULT_TEMPERATURE = 0.8
-DEFAULT_REPETITION_PENALTY = 1.2
-DEFAULT_MIN_P = 0.05
-DEFAULT_TOP_P = 1.0
-
 SEED_MIN = 1
 SEED_MAX = 1000
 
@@ -110,10 +115,18 @@ MAX_AUDIO_B64_LEN = 10_000_000
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
+# Dynamic Literal built from the engine's own language table, so the request
+# schema, the /capabilities enum, and engine-side validation share one source.
+# (dict preserves insertion order, so the enum is stable across processes.)
+Language = Literal[tuple(SUPPORTED_LANGUAGES)]
+
 
 class SynthesisRequest(BaseModel):
-    """A single synthesis request."""
+    """A single synthesis request. Unknown fields are rejected (422)."""
 
+    model_config = ConfigDict(extra="forbid")
+
+    # --- core vocabulary (tts_engine_common.CORE_FIELDS) -------------------
     text: str = Field(
         ...,
         min_length=1,
@@ -129,8 +142,14 @@ class SynthesisRequest(BaseModel):
             "FLAC, ...).  The model uses only its first 10 s."
         ),
     )
-
-    # Optional overrides (defaults mirror the model's own defaults)
+    language: Language | None = Field(
+        None,
+        description=(
+            "Language code, e.g. 'en', 'fr', 'zh' "
+            f"(supported: {', '.join(SUPPORTED_LANGUAGES)}). "
+            "Omit to skip the language tag."
+        ),
+    )
     seed: int | None = Field(
         None,
         ge=SEED_MIN,
@@ -140,8 +159,10 @@ class SynthesisRequest(BaseModel):
             f"in [{SEED_MIN}, {SEED_MAX}] is chosen and echoed in the response."
         ),
     )
+
+    # --- engine-specific tuning (defaults mirror the model's own defaults) --
     exaggeration: float = Field(
-        DEFAULT_EXAGGERATION,
+        0.5,
         ge=0.0,
         le=2.0,
         description=(
@@ -150,7 +171,7 @@ class SynthesisRequest(BaseModel):
         ),
     )
     cfg_weight: float = Field(
-        DEFAULT_CFG_WEIGHT,
+        0.5,
         ge=0.0,
         le=1.0,
         description=(
@@ -160,36 +181,28 @@ class SynthesisRequest(BaseModel):
         ),
     )
     temperature: float = Field(
-        DEFAULT_TEMPERATURE,
+        0.8,
         ge=0.0,
         le=2.0,
         description="Sampling temperature for the T3 language model.",
     )
     repetition_penalty: float = Field(
-        DEFAULT_REPETITION_PENALTY,
+        1.2,
         ge=1.0,
         le=2.0,
         description="Penalty applied to repeated speech tokens.",
     )
     min_p: float = Field(
-        DEFAULT_MIN_P,
+        0.05,
         ge=0.0,
         le=1.0,
         description="Min-p sampling threshold.",
     )
     top_p: float = Field(
-        DEFAULT_TOP_P,
+        1.0,
         ge=0.0,
         le=1.0,
         description="Nucleus (top-p) sampling threshold.",
-    )
-    language: str | None = Field(
-        None,
-        description=(
-            "Language code for the multilingual model, e.g. 'en', 'fr', 'zh' "
-            f"(supported: {', '.join(SUPPORTED_LANGUAGES)}).  Case-insensitive. "
-            "Omit to skip the language tag."
-        ),
     )
 
     @field_validator("text")
@@ -199,60 +212,11 @@ class SynthesisRequest(BaseModel):
             raise ValueError("text must contain non-whitespace characters")
         return v
 
-    @field_validator("language")
-    @classmethod
-    def _validate_language(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        code = v.strip().lower()
-        if code not in SUPPORTED_LANGUAGES:
-            supported = ", ".join(SUPPORTED_LANGUAGES)
-            raise ValueError(
-                f"Unsupported language {v!r}. Supported languages: {supported}"
-            )
-        return code
 
+class SynthesisResponse(CoreSynthesisResponse):
+    """The synthesis result (core fields from tts_engine_common, plus fid)."""
 
-class SynthesisResponse(BaseModel):
-    """The synthesis result."""
-
-    audio_base64: str = Field(
-        ...,
-        description="Generated WAV audio (PCM_16, PerTh-watermarked) as base64.",
-    )
-    sample_rate: int = Field(..., description="Audio sample rate (Hz).")
-    seed: int = Field(..., description="Seed used for this generation.")
     fid: str = Field(..., description="Request ID (internal).")
-    time_used: float = Field(
-        ..., description="Wall-clock generation time in seconds."
-    )
-    rtf: float | None = Field(
-        ...,
-        description=(
-            "Real-time factor (time / audio duration).  "
-            "null when audio duration is zero."
-        ),
-    )
-
-    @field_validator("rtf", mode="before")
-    @classmethod
-    def _sanitize_rtf(cls, v: float | None) -> float | None:
-        """Replace inf / nan with None so JSON serialization never fails."""
-        if v is None:
-            return None
-        if math.isinf(v) or math.isnan(v):
-            return None
-        return v
-
-    @field_validator("time_used", mode="before")
-    @classmethod
-    def _sanitize_time_used(cls, v: float | None) -> float | None:
-        """Guard against inf / nan in time_used as well."""
-        if v is None:
-            return None
-        if math.isinf(v) or math.isnan(v):
-            return 0.0
-        return v
 
 
 class HealthResponse(BaseModel):
@@ -263,6 +227,38 @@ class HealthResponse(BaseModel):
     model: str = MODEL_LABEL
     device: str = DEVICE
 
+
+# ---------------------------------------------------------------------------
+# Capabilities (derived from SynthesisRequest — single source of truth)
+# ---------------------------------------------------------------------------
+
+CAPABILITIES = build_capabilities(
+    SynthesisRequest,
+    engine="chatterbox",
+    model=MODEL_LABEL,
+    device=DEVICE,
+    sample_rate=S3GEN_SR,
+    watermarked=True,  # the PerTh watermark is applied inside the library
+    endpoint="/synthesize",
+    reference_audio={
+        "required": True,
+        "formats": ["wav", "mp3", "ogg", "flac"],
+        "min_duration_s": MIN_PROMPT_DURATION_S,
+        "note": (
+            "Only the first 10 s are used for speaker conditioning; longer "
+            "clips are truncated."
+        ),
+    },
+    languages=list(SUPPORTED_LANGUAGES),
+    overrides={
+        "exaggeration": {"step": 0.05},
+        "cfg_weight": {"step": 0.05},
+        "temperature": {"step": 0.05},
+        "repetition_penalty": {"step": 0.05, "advanced": True},
+        "min_p": {"step": 0.01, "advanced": True},
+        "top_p": {"step": 0.01, "advanced": True},
+    },
+)
 
 # ---------------------------------------------------------------------------
 # Application
@@ -288,10 +284,19 @@ app = FastAPI(
     description=(
         "REST API around Chatterbox Multilingual.  Send text + a reference "
         "audio sample and get back cloned speech.  Synthesis requests are "
-        "serialized (single shared model)."
+        "serialized (single shared model).  Machine-readable parameter "
+        "metadata at GET /capabilities."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
+)
+
+app.add_api_route(
+    "/capabilities",
+    capabilities_endpoint(CAPABILITIES),
+    methods=["GET"],
+    tags=["System"],
+    summary="Machine-readable description of the request parameters",
 )
 
 # ---------------------------------------------------------------------------
@@ -349,9 +354,7 @@ def _get_runtime() -> ChatterboxRuntime:
 
 
 @app.exception_handler(Exception)
-async def _unhandled_exception(
-    _request, exc: Exception
-) -> JSONResponse:
+async def _unhandled_exception(_request, exc: Exception) -> JSONResponse:
     """Return a meaningful 500 instead of FastAPI's blank ``detail: ''``."""
     logger.error("Unhandled exception: {}", exc, exc_info=True)
     return JSONResponse(
@@ -379,6 +382,7 @@ def root() -> str:
         <p>Use a REST client like <strong>Postman</strong>, <strong>Insomnia</strong>,
         or <strong>curl</strong> to make requests (interactive docs at <a href="/docs">/docs</a>).</p>
         <ul>
+            <li><code>GET /capabilities</code> &mdash; Machine-readable parameter metadata</li>
             <li><code>GET /health</code> &mdash; Check server status</li>
             <li><code>POST /synthesize</code> &mdash; Generate cloned speech</li>
         </ul>
@@ -405,21 +409,8 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     """
     Synthesize audio using the provided text and reference audio sample.
 
-    Parameters
-    ----------
-    req : SynthesisRequest
-        - **text**: The text to speak.
-        - **audio_base64**: Base64-encoded reference audio (~10 s).
-        - **language** (optional): Language code, e.g. 'en', 'fr', 'zh'.
-        - **seed** (optional): Random seed (1-1000).  Random if omitted.
-        - **exaggeration**, **cfg_weight**, **temperature**,
-          **repetition_penalty**, **min_p**, **top_p**:
-          Optional tuning parameters (defaults are the model's).
-
-    Returns
-    -------
-    SynthesisResponse
-        Base64-encoded WAV audio, sample rate, seed, timing metrics.
+    The full parameter list is documented at GET /capabilities; the request
+    schema mirrors it exactly (same model, no drift).
     """
     runtime = _get_runtime()
 
@@ -442,8 +433,8 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     # Decode and sanity-check the reference audio before touching the model.
     try:
-        raw_audio = base64.b64decode(req.audio_base64, validate=True)
-    except Exception as exc:
+        raw_audio = decode_base64(req.audio_base64)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid base64 audio: {exc}")
 
     _check_reference_audio(raw_audio)
@@ -474,14 +465,13 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         audio_array = wav[0].detach().cpu().numpy()
         sample_rate = runtime.sample_rate
 
-        # Compute audio duration and RTF.
-        audio_duration = len(audio_array) / sample_rate if sample_rate else 0.0
-        rtf = time_used / audio_duration if audio_duration > 0 else None
+        rtf = compute_rtf(time_used, len(audio_array), sample_rate)
 
         # Encode the output WAV to base64.
         audio_bytes = _numpy_to_wav_bytes(audio_array, sample_rate)
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
 
+        audio_duration = len(audio_array) / sample_rate if sample_rate else 0.0
         logger.info(
             "Synthesis complete: {:.1f} s wall-clock, {:.1f} s audio, RTF={}",
             time_used,

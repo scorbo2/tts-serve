@@ -2,197 +2,339 @@
 FastAPI REST server for Qwen3-TTS voice cloning.
 
 Loads the model once on startup, then exposes a single POST endpoint for
-synthesis.  Clients send text, a reference audio sample (base64), and the
-transcript of that sample.  The server returns the generated audio as
-base64-encoded WAV.
+synthesis.  Clients send text plus a reference audio sample (base64); the
+transcript of that sample is optional (when omitted, the engine falls back
+to speaker-embedding-only cloning, which may reduce quality).  The server
+returns the generated audio as base64-encoded 24 kHz WAV.
+
+Capabilities: GET /capabilities returns a machine-readable description of
+every request parameter, derived from the Pydantic request model so it can
+never drift from what the server actually validates (see the
+tts-engine-common README).
+
+Model weights are downloaded from HuggingFace on first start unless a local
+path is given.  The language list below is the Base checkpoint's (10
+languages + auto); the engine itself validates against its own config.
+
+Configuration (environment variables):
+    QWEN3TTS_MODEL      HuggingFace id or local path.
+                        Default: Qwen/Qwen3-TTS-12Hz-1.7B-Base
+    QWEN3TTS_DEVICE     Device to load the model on.  One of: cuda, mps, cpu.
+                        Default: cuda
+    QWEN3TTS_HOST       Bind host for `python server_qwen3TTS.py`.
+                        Default: 0.0.0.0
+    QWEN3TTS_PORT       Bind port for `python server_qwen3TTS.py`.
+                        Default: 8000
+
+Extra dependencies beyond the qwen-tts package:
+    pip install fastapi uvicorn loguru soundfile
+    pip install tts-engine-common    # or: pip install -e ../tts-engine-common
 
 Usage:
-    uvicorn apps.rest_api.server:app --host 0.0.0.0 --port 8000
+    python server_qwen3TTS.py
+    # or: uvicorn server_qwen3TTS:app --host 0.0.0.0 --port 8000
 """
 
 from __future__ import annotations
 
 import base64
 import io
-import math
+import os
 import random
+import time
 import uuid
-from pathlib import Path
-from typing import Any, NamedTuple
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Literal
 
-import soundfile as sf  # noqa: E402
-import torch  # noqa: E402
-from fastapi import FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import HTMLResponse  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
-from loguru import logger  # noqa: E402
-from pydantic import BaseModel, Field, field_validator  # noqa: E402
-from qwen_tts import Qwen3TTSModel  # noqa: E402
-from typing_extensions import Literal  # noqa: E402
-
+import numpy as np
+import soundfile as sf
+import torch
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from qwen_tts import Qwen3TTSModel
+from tts_engine_common import (
+    CoreSynthesisResponse,
+    build_capabilities,
+    capabilities_endpoint,
+    compute_rtf,
+    decode_base64,
+)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Configuration
 # ---------------------------------------------------------------------------
 
-# You can specify a huggingface id, like ""Qwen/Qwen3-TTS-12Hz-1.7B-Base"",
-# or a local path, like "/home/user/myModes/Qwen3-TTS-Base/"
-MODEL_NAME_OR_PATH = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
+
+MODEL_NAME_OR_PATH = os.getenv("QWEN3TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+DEVICE = os.getenv("QWEN3TTS_DEVICE", "cuda")
+
+# The speech tokenizer emits 24 kHz audio; generate_voice_clone() echoes the
+# rate back in its return value, which is what every response uses.
+SAMPLE_RATE = 24000
 
 SEED_MIN = 1
 SEED_MAX = 1000
 
+# Heuristic lower bound: below this the speaker embedding / reference codes
+# degrade to near-garbage (the README's "3-second rapid voice clone" is the
+# sweet spot).
+MIN_REF_DURATION_S = 2.0
 
-class Runtime(NamedTuple):
-    """Holds the loaded model instance."""
-    model: Qwen3TTSModel
+# Sanity valve for the request payload (~5 min of 24 kHz audio).
+MAX_AUDIO_B64_LEN = 10_000_000
+
+# Base checkpoint language support (the engine lower-cases and validates
+# against its own config at generate time, so this list is a UI/validation
+# convenience, not the final arbiter).
+LANGUAGE_NAMES = (
+    "chinese",
+    "english",
+    "french",
+    "german",
+    "italian",
+    "japanese",
+    "korean",
+    "portuguese",
+    "russian",
+    "spanish",
+)
 
 
-# Global — lazily initialised on first request or at startup.
-_runtime: Runtime | None = None
+def _validate_config() -> None:
+    """Fail fast on bad configuration instead of partway through a model download."""
+    if DEVICE not in SUPPORTED_DEVICES:
+        raise ValueError(
+            f"QWEN3TTS_DEVICE must be one of {SUPPORTED_DEVICES}, got {DEVICE!r}"
+        )
+
+
+_validate_config()
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
+# Dynamic Literal over the Base checkpoint's language names (+ auto) so the
+# request schema and the /capabilities enum share one source.
+Language = Literal[("auto", *LANGUAGE_NAMES)]
+
 
 class SynthesisRequest(BaseModel):
-    """A single synthesis request."""
+    """A single synthesis request. Unknown fields are rejected (422)."""
 
-    text: str = Field(..., description="Text to synthesize, e.g. 'Hello there'")
+    model_config = ConfigDict(extra="forbid")
+
+    # --- core vocabulary (tts_engine_common.CORE_FIELDS) -------------------
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Text to synthesize, e.g. 'Hello there'.",
+    )
     audio_base64: str = Field(
         ...,
+        min_length=1,
+        max_length=MAX_AUDIO_B64_LEN,
         description=(
-            "Reference audio sample (~10 s WAV) encoded as a base64 string. "
-            "The server will decode this to a temporary WAV file before synthesis."
+            "Reference voice sample as a base64 string.  Any container "
+            "soundfile can decode (WAV, MP3, OGG, FLAC, ...).  ~3 s is enough "
+            "for high-quality cloning."
         ),
     )
-    prompt_text: str = Field(
-        ...,
+    reference_text: str | None = Field(
+        None,
         description=(
-            "Exact transcript of the reference audio, e.g. "
-            "'Hello, my name is Alice, nice to meet you'."
+            "Exact transcript of the reference audio.  If omitted, "
+            "x_vector_only_mode is enabled automatically (speaker-embedding-"
+            "only cloning; quality may be reduced)."
         ),
     )
-
-    # Optional overrides (defaults are sensible for voice cloning)
+    language: Language | None = Field(
+        None,
+        description=(
+            "Language name (e.g. 'english', 'chinese') or 'auto'.  Omit or "
+            "pass 'auto' for auto-detection."
+        ),
+    )
     seed: int | None = Field(
         None,
         ge=SEED_MIN,
         le=SEED_MAX,
         description=(
             "Random seed for reproducibility.  If omitted, a random seed "
-            f"in [{SEED_MIN}, {SEED_MAX}] is chosen."
+            f"in [{SEED_MIN}, {SEED_MAX}] is chosen and echoed in the response."
         ),
     )
-    language: str | None = Field(
+
+    # --- engine-specific tuning (None = engine default) ---------------------
+    x_vector_only_mode: bool = Field(
+        False,
+        description=(
+            "Use only the speaker embedding (no reference transcript / "
+            "in-context codes).  Cloning quality may be reduced."
+        ),
+    )
+    temperature: float | None = Field(
         None,
-        description=(
-            "Language of the text to synthesize (e.g. 'English', 'Chinese', "
-            "'Japanese').  Omit or pass 'Auto' for auto-detection."
-        ),
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature.  Omit for the engine default.",
+    )
+    top_p: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Nucleus sampling threshold.  Omit for the engine default.",
+    )
+    repetition_penalty: float | None = Field(
+        None,
+        ge=1.0,
+        le=2.0,
+        description="Penalty applied to repeated tokens.  Omit for the engine default.",
     )
 
-
-class SynthesisResponse(BaseModel):
-    """The synthesis result."""
-
-    audio_base64: str = Field(
-        ...,
-        description="Generated WAV audio encoded as a base64 string.",
-    )
-    sample_rate: int = Field(..., description="Audio sample rate (Hz).")
-    seed: int = Field(..., description="Seed used for this generation.")
-    time_used: float = Field(
-        ..., description="Wall-clock generation time in seconds."
-    )
-    rtf: float | None = Field(
-        ...,
-        description=(
-            "Real-time factor (time / audio duration).  "
-            "null when audio duration is zero."
-        ),
-    )
-
-    @field_validator("rtf", mode="before")
+    @field_validator("text")
     @classmethod
-    def _sanitize_rtf(cls, v: float | None) -> float | None:
-        """Replace inf / nan with None so JSON serialization never fails."""
-        if v is None:
-            return None
-        if math.isinf(v) or math.isnan(v):
-            return None
+    def _validate_text(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("text must contain non-whitespace characters")
         return v
 
-    @field_validator("time_used", mode="before")
-    @classmethod
-    def _sanitize_time_used(cls, v: float | None) -> float | None:
-        """Guard against inf / nan in time_used as well."""
-        if v is None:
-            return None
-        if math.isinf(v) or math.isnan(v):
-            return 0.0
-        return v
+
+class SynthesisResponse(CoreSynthesisResponse):
+    """The synthesis result (core fields from tts_engine_common, plus fid)."""
+
+    fid: str = Field(..., description="Request ID (internal).")
 
 
 class HealthResponse(BaseModel):
     """Health / readiness check."""
 
     status: Literal["ok"] = "ok"
+    serverType: Literal["Qwen3-TTS"] = "Qwen3-TTS"
     model: str = MODEL_NAME_OR_PATH
-    serverType: str = "Qwen3-TTS"
+    device: str = DEVICE
 
+
+# ---------------------------------------------------------------------------
+# Capabilities (derived from SynthesisRequest — single source of truth)
+# ---------------------------------------------------------------------------
+
+CAPABILITIES = build_capabilities(
+    SynthesisRequest,
+    engine="qwen3-tts",
+    model=MODEL_NAME_OR_PATH,
+    device=DEVICE,
+    sample_rate=SAMPLE_RATE,
+    watermarked=False,
+    endpoint="/synthesize",
+    reference_audio={
+        "required": True,
+        "formats": ["wav", "mp3", "ogg", "flac"],
+        "min_duration_s": MIN_REF_DURATION_S,
+        "note": (
+            "~3 s is enough for high-quality cloning.  If reference_text is "
+            "omitted, cloning falls back to speaker-embedding-only mode."
+        ),
+    },
+    languages=sorted(LANGUAGE_NAMES),
+    overrides={
+        "x_vector_only_mode": {"advanced": True},
+        "temperature": {"step": 0.05},
+        "top_p": {"step": 0.01, "advanced": True},
+        "repetition_penalty": {"step": 0.05, "advanced": True},
+    },
+)
 
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Pre-load the model on startup and free it on shutdown."""
+    _get_runtime()
+    yield
+    global _runtime
+    if _runtime is not None:
+        del _runtime.model
+        _runtime = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("Model unloaded and CUDA cache cleared.")
+
+
 app = FastAPI(
     title="Qwen3-TTS Voice Cloning API",
     description=(
-        "REST API around Qwen3-TTS.  Send text + a reference audio sample "
-        "and get back cloned speech."
+        "REST API around Qwen3-TTS.  Send text + a reference audio sample and "
+        "get back cloned speech.  Machine-readable parameter metadata at "
+        "GET /capabilities."
     ),
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
+)
+
+app.add_api_route(
+    "/capabilities",
+    capabilities_endpoint(CAPABILITIES),
+    methods=["GET"],
+    tags=["System"],
+    summary="Machine-readable description of the request parameters",
 )
 
 # ---------------------------------------------------------------------------
-# Lazy model loading — loaded on first request (or explicitly via startup).
+# Runtime — thin wrapper around the Qwen3-TTS model
 # ---------------------------------------------------------------------------
 
-def _get_runtime() -> Runtime:
-    """Return the global runtime, loading the model once if necessary.
+
+@dataclass
+class Qwen3TTSRuntime:
+    """Holds the loaded model and its metadata for the lifetime of the server."""
+
+    model: Qwen3TTSModel
+    device: str
+
+
+_runtime: Qwen3TTSRuntime | None = None
+
+
+def _get_runtime() -> Qwen3TTSRuntime:
+    """Return the global runtime, loading the model once on first call.
 
     The model is loaded in bfloat16 with Flash Attention 2 for best
-    performance.  If Flash Attention 2 is unavailable, it falls back
-    to the default attention implementation.
+    performance; if Flash Attention 2 is unavailable, it falls back to the
+    default attention implementation.
     """
     global _runtime
-    if _runtime is not None:
-        return _runtime
-
-    logger.info("Loading Qwen3-TTS model '{}' on CUDA ...", MODEL_NAME_OR_PATH)
-
-    attn_impl = "flash_attention_2"
-    try:
-        model = Qwen3TTSModel.from_pretrained(
+    if _runtime is None:
+        logger.info(
+            "Loading Qwen3-TTS model '%s' on device '%s' ...",
             MODEL_NAME_OR_PATH,
-            device_map="cuda:0",
-            dtype=torch.bfloat16,
-            attn_implementation=attn_impl,
+            DEVICE,
         )
-    except Exception:
-        logger.warning(
-            "Flash Attention 2 unavailable; falling back to default attention."
-        )
-        model = Qwen3TTSModel.from_pretrained(
-            MODEL_NAME_OR_PATH,
-            device_map="cuda:0",
-            dtype=torch.bfloat16,
-        )
-
-    _runtime = Runtime(model=model)
-    logger.info("Model loaded successfully.")
+        try:
+            model = Qwen3TTSModel.from_pretrained(
+                MODEL_NAME_OR_PATH,
+                device_map=DEVICE,
+                dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+            )
+        except Exception:
+            logger.warning(
+                "Flash Attention 2 unavailable; falling back to default attention."
+            )
+            model = Qwen3TTSModel.from_pretrained(
+                MODEL_NAME_OR_PATH,
+                device_map=DEVICE,
+                dtype=torch.bfloat16,
+            )
+        _runtime = Qwen3TTSRuntime(model=model, device=DEVICE)
+        logger.info("Model loaded successfully.")
     return _runtime
 
 
@@ -202,9 +344,7 @@ def _get_runtime() -> Runtime:
 
 
 @app.exception_handler(Exception)
-async def _unhandled_exception(
-    _request, exc: Exception
-) -> JSONResponse:
+async def _unhandled_exception(_request, exc: Exception) -> JSONResponse:
     """Return a meaningful 500 instead of FastAPI's blank ``detail: ''``."""
     logger.error("Unhandled exception: {}", exc, exc_info=True)
     return JSONResponse(
@@ -214,42 +354,25 @@ async def _unhandled_exception(
 
 
 # ---------------------------------------------------------------------------
-# Startup / shutdown hooks
-# ---------------------------------------------------------------------------
-
-
-@app.on_event("startup")
-def startup() -> None:
-    """Pre-load the model so the first request is fast."""
-    _get_runtime()
-
-
-@app.on_event("shutdown")
-def shutdown() -> None:
-    """Clean up GPU resources."""
-    global _runtime
-    _runtime = None  # Drop the only reference; GC + PyTorch will free the model.
-    torch.cuda.empty_cache()
-    logger.info("Model unloaded and CUDA cache cleared.")
-
-
-# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/", response_class=HTMLResponse, tags=["System"])
 def root() -> str:
     """A friendly landing page so browser visitors don't get the auto-generated docs."""
-    return """
+    return f"""
     <!DOCTYPE html>
     <html>
     <head><title>Qwen3-TTS REST API</title></head>
     <body>
         <h1>Qwen3-TTS Voice Cloning REST API</h1>
-        <p>This server is configured and running. It is a REST API, not a web server.</p>
+        <p>Model: <code>{MODEL_NAME_OR_PATH}</code> on <code>{DEVICE}</code>.
+        This server is a REST API, not a web server.</p>
         <p>Use a REST client like <strong>Postman</strong>, <strong>Insomnia</strong>,
-        or <strong>curl</strong> to make requests.</p>
+        or <strong>curl</strong> to make requests (interactive docs at <a href="/docs">/docs</a>).</p>
         <ul>
+            <li><code>GET /capabilities</code> &mdash; Machine-readable parameter metadata</li>
             <li><code>GET /health</code> &mdash; Check server status</li>
             <li><code>POST /synthesize</code> &mdash; Generate cloned speech</li>
         </ul>
@@ -257,11 +380,11 @@ def root() -> str:
     </html>
     """
 
+
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 def health() -> HealthResponse:
     """Check whether the server is alive and the model is loaded."""
-    model_loaded = _runtime is not None
-    if not model_loaded:
+    if _runtime is None:
         logger.warning("Health check: model not yet loaded.")
     return HealthResponse()
 
@@ -277,68 +400,92 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     Synthesize audio using the provided text and reference audio sample.
 
     The Qwen3-TTS Base model performs zero-shot voice cloning: it takes a
-    short reference audio clip and its transcript, then generates new speech
-    in the same voice.
+    short reference audio clip (and optionally its transcript), then
+    generates new speech in the same voice.
+
+    The full parameter list is documented at GET /capabilities; the request
+    schema mirrors it exactly (same model, no drift).
     """
     runtime = _get_runtime()
 
     # Resolve randomised seed for reproducibility.
     seed = req.seed if req.seed is not None else random.randint(SEED_MIN, SEED_MAX)
-    torch.manual_seed(seed)
 
-    # TalkWithMe sends up a two-letter language code like "en" or "fr",
-    # but Qwen wants a full language name like "English" or "French".
-    # We could translate this here, but I actually find just using "auto"
-    # seems to work without issue, even with multi-lingual personas.
-    #language = req.language if req.language else "Auto"
-    language = "auto" # just hard-code it
+    # Omitting the transcript is not an error: the engine's ICL mode requires
+    # it, so we transparently switch to speaker-embedding-only cloning.
+    x_vector_only = req.x_vector_only_mode or req.reference_text is None
 
     logger.info(
-        "Synthesizing: seed={}, text_len={}, lang={}",
+        "Synthesizing: seed={}, text_len={}, lang={}, x_vector_only={}",
         seed,
         len(req.text),
-        language,
+        req.language,
+        x_vector_only,
     )
 
-    # Decode the base64 audio and write to a temporary file.
+    # Decode the reference audio in memory; the engine accepts
+    # (np.ndarray, sr) tuples directly, so no temp file is needed (and the
+    # engine's base64-string heuristic — which fails on b64 containing '/' —
+    # is sidestepped entirely).
     try:
-        raw_audio = base64.b64decode(req.audio_base64)
-    except Exception as exc:
+        raw_audio = decode_base64(req.audio_base64)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid base64 audio: {exc}")
 
-    prompt_audio_path = _write_temp_wav(raw_audio)
+    _check_reference_audio(raw_audio)
 
     try:
-        # generate_voice_clone returns (wavs, sr) where wavs is a numpy array
-        # of shape (batch, samples) and sr is the sample rate.
-        start_time = torch.cuda.Event(enable_timing=True)
-        end_time = torch.cuda.Event(enable_timing=True)
-        start_time.record()
-
-        wavs, sr = runtime.model.generate_voice_clone(
-            text=req.text,
-            language=language,
-            ref_audio=prompt_audio_path,
-            ref_text=req.prompt_text,
+        ref_wav, ref_sr = _decode_wav(raw_audio)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not decode reference audio: {exc}"
         )
 
-        end_time.record()
-        torch.cuda.synchronize()
-        elapsed_ms = start_time.elapsed_time(end_time)
-        time_used = elapsed_ms / 1000.0
+    # Only forward sampling params the client actually set, so the engine's
+    # own defaults apply otherwise.
+    sampling = {
+        "temperature": req.temperature,
+        "top_p": req.top_p,
+        "repetition_penalty": req.repetition_penalty,
+    }
+    sampling = {k: v for k, v in sampling.items() if v is not None}
+
+    try:
+        t0 = time.perf_counter()
+
+        torch.manual_seed(seed)
+        wavs, sr = runtime.model.generate_voice_clone(
+            text=req.text,
+            language=req.language,  # None -> engine's "Auto"
+            ref_audio=(ref_wav, ref_sr),
+            ref_text=req.reference_text,
+            x_vector_only_mode=x_vector_only,
+            **sampling,
+        )
+
+        time_used = time.perf_counter() - t0
 
         # wavs[0] is the generated waveform (1-D numpy array, float32).
         wav = wavs[0]
-        audio_duration = len(wav) / sr if sr else 0
-        rtf = time_used / audio_duration if audio_duration > 0 else None
+
+        rtf = compute_rtf(time_used, len(wav), sr)
 
         audio_bytes = _numpy_to_wav_bytes(wav, sr)
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+
+        audio_duration = len(wav) / sr if sr else 0.0
+        logger.info(
+            "Synthesis complete: {:.1f} s wall-clock, {:.1f} s audio, RTF={}",
+            time_used,
+            audio_duration,
+            f"{rtf:.3f}" if rtf is not None else "n/a",
+        )
 
         return SynthesisResponse(
             audio_base64=audio_b64,
             sample_rate=sr,
             seed=seed,
+            fid=str(uuid.uuid4()),
             time_used=time_used,
             rtf=rtf,
         )
@@ -346,51 +493,48 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     except Exception as exc:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        # Clean up the temporary prompt audio file.
-        _cleanup_temp(prompt_audio_path)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TEMP_AUDIO_DIR = Path("/tmp/qwen3_tts_rest_api")
-_TEMP_AUDIO_DIR.mkdir(exist_ok=True)
 
-
-def _write_temp_wav(raw_bytes: bytes) -> str:
-    """
-    Write raw audio bytes to a temporary WAV file.
-
-    The input is expected to be a valid WAV file (just bytes).  We write it
-    directly to disk because the model's ref_audio parameter accepts file paths.
-    """
-    path = _TEMP_AUDIO_DIR / f"{uuid.uuid4().hex}.wav"
-    path.write_bytes(raw_bytes)
-    logger.debug("Wrote temporary prompt audio: {}", path)
-    return str(path)
-
-
-def _cleanup_temp(path: str) -> None:
-    """Remove a temporary audio file if it exists."""
+def _check_reference_audio(raw_bytes: bytes) -> None:
+    """Header-only decode to reject undecodable or too-short reference clips."""
     try:
-        Path(path).unlink(missing_ok=True)
-    except OSError:
-        pass
+        info = sf.info(io.BytesIO(raw_bytes))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not decode reference audio: {exc}"
+        )
+    duration = info.frames / info.samplerate if info.samplerate else 0.0
+    if duration < MIN_REF_DURATION_S:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Reference audio is {duration:.2f} s long; at least "
+                f"{MIN_REF_DURATION_S:.0f} s is required for usable voice cloning."
+            ),
+        )
 
 
-def _numpy_to_wav_bytes(audio_array: Any, sample_rate: int) -> bytes:
-    """
-    Convert a numpy audio array to WAV-encoded bytes.
+def _decode_wav(raw_bytes: bytes) -> tuple[np.ndarray, int]:
+    """Full decode to a mono 1-D float32 waveform plus its sample rate."""
+    wav, sr = sf.read(io.BytesIO(raw_bytes), dtype="float32")
+    if wav.ndim > 1:  # multi-channel -> mono (the engine expects 1-D)
+        wav = wav.mean(axis=1)
+    return wav, sr
 
-    Qwen3TTSModel.generate_voice_clone returns numpy arrays (not tensors),
-    so we use this helper instead of a tensor-based one.
-    """
+
+def _numpy_to_wav_bytes(audio_array: np.ndarray, sample_rate: int) -> bytes:
+    """Convert a numpy audio array to WAV-encoded bytes (PCM_16)."""
     buffer = io.BytesIO()
+    # Clip to [-1, 1]: the PCM_16 conversion wraps out-of-range floats instead
+    # of clamping them, which would produce crackling artifacts.
     sf.write(
         buffer,
-        audio_array,
+        np.clip(audio_array, -1.0, 1.0),
         sample_rate,
         format="WAV",
         subtype="PCM_16",
@@ -399,16 +543,15 @@ def _numpy_to_wav_bytes(audio_array: Any, sample_rate: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Main (for running directly: python -m apps.rest_api.server)
+# Main (for running directly: python server_qwen3TTS.py)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
 
-    logger.info("Starting Qwen3-TTS REST API server on 0.0.0.0:8000")
-    uvicorn.run(
-        "apps.rest_api.server:app",
-        host="0.0.0.0",
-        port=8000,
-        log_level="info",
-    )
+    host = os.getenv("QWEN3TTS_HOST", "0.0.0.0")
+    port = int(os.getenv("QWEN3TTS_PORT", "8000"))
+    logger.info("Starting Qwen3-TTS REST API server on %s:%d", host, port)
+    # Pass the app object directly instead of a module path string,
+    # so this works regardless of how the file is invoked.
+    uvicorn.run(app, host=host, port=port, log_level="info")
