@@ -12,7 +12,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, Field
 
-from tts_engine_common import DerivationError, build_capabilities
+from tts_engine_common import SCHEMA_VERSION, DerivationError, build_capabilities
 
 METADATA = dict(
     engine="test-engine",
@@ -339,6 +339,8 @@ class TestDocumentMetadata:
         # WHEN built with only required metadata:
         doc = build_capabilities(Request, **METADATA)
 
-        # THEN the endpoint defaults and the schema version is current:
+        # THEN the endpoint defaults and the schema version is current
+        # (compare against the constant, not a hardcoded number, so future
+        # bumps fail here deliberately rather than drifting):
         assert doc.endpoint == "/synthesize"
-        assert doc.schema_version == 1
+        assert doc.schema_version == SCHEMA_VERSION

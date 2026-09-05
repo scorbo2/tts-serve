@@ -34,15 +34,18 @@ def test_capabilities_matches_snapshot(client):
     assert doc == load_snapshot("qwen3_capabilities.json")
 
 
-def test_capabilities_language_enum_includes_auto(client):
+def test_capabilities_language_enum_is_codes_plus_auto(client):
     doc = client.get("/capabilities").json()
     by_name = {p["name"]: p for p in doc["parameters"]}
     enum = by_name["language"]["enum"]
+    # The API contract is two-letter codes (docs/02) plus the engine's
+    # 'auto' auto-detection sentinel; the engine-internal names must not
+    # leak into the document.
     assert "auto" in enum
-    # Language values are lowercase *names* (the engine's own convention).
-    assert "english" in enum
-    assert "English" not in enum
-    assert doc["languages"] == sorted(srv.LANGUAGE_NAMES)
+    assert "en" in enum
+    assert "zh" in enum
+    assert "english" not in enum
+    assert doc["languages"] == sorted(srv.LANGUAGE_CODES)
 
 
 def test_capabilities_required_fields(client):
@@ -120,9 +123,15 @@ def test_synthesize_empty_audio_rejected(client):
 
 
 def test_synthesize_unsupported_language_rejected(client):
+    # A valid code that the Base checkpoint does not support.
     payload = _valid_payload()
-    payload["language"] = "french-quebec"  # not a Base-checkpoint language
+    payload["language"] = "xx"
     assert _post(client, payload).status_code == 422
+
+
+# The shared docs/02 language contract (case, names, garbage, non-strings,
+# null/empty -> 'en') is asserted once for every server in
+# test_language_contract.py; keep only engine-specific language tests here.
 
 
 def test_synthesize_temperature_above_range_rejected(client):

@@ -159,6 +159,12 @@ def test_synthesize_seed_out_of_range_rejected(client):
     assert _post(client, payload).status_code == 422
 
 
+# The shared docs/02 language contract (case, names, garbage, non-strings,
+# null/empty -> 'en', and the 'auto' sentinel per declaration) is asserted
+# once for every server in test_language_contract.py; keep only
+# engine-specific language tests here.
+
+
 # ---------------------------------------------------------------------------
 # POST /synthesize — reference-audio pre-flight (400)
 # ---------------------------------------------------------------------------

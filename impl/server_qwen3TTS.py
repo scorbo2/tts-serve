@@ -56,11 +56,13 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from qwen_tts import Qwen3TTSModel
 from tts_engine_common import (
+    DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
     compute_rtf,
     decode_base64,
+    normalize_language,
 )
 
 # ---------------------------------------------------------------------------
@@ -88,20 +90,25 @@ MIN_REF_DURATION_S = 2.0
 MAX_AUDIO_B64_LEN = 10_000_000
 
 # Base checkpoint language support (the engine lower-cases and validates
-# against its own config at generate time, so this list is a UI/validation
+# against its own config at generate time, so this table is a UI/validation
 # convenience, not the final arbiter).
-LANGUAGE_NAMES = (
-    "chinese",
-    "english",
-    "french",
-    "german",
-    "italian",
-    "japanese",
-    "korean",
-    "portuguese",
-    "russian",
-    "spanish",
-)
+#
+# The API contract is two-letter codes (docs/02-language-handling.md); the
+# engine wants lowercase *names*, so LANGUAGE_CODE_TO_NAME is this server's
+# internal mapping table and everything else is derived from it.
+LANGUAGE_CODE_TO_NAME = {
+    "zh": "chinese",
+    "en": "english",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+    "ja": "japanese",
+    "ko": "korean",
+    "pt": "portuguese",
+    "ru": "russian",
+    "es": "spanish",
+}
+LANGUAGE_CODES = tuple(LANGUAGE_CODE_TO_NAME)
 
 
 def _validate_config() -> None:
@@ -118,9 +125,10 @@ _validate_config()
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
-# Dynamic Literal over the Base checkpoint's language names (+ auto) so the
-# request schema and the /capabilities enum share one source.
-Language = Literal[("auto", *LANGUAGE_NAMES)]
+# Dynamic Literal over the Base checkpoint's language codes (+ the engine's
+# 'auto' auto-detection sentinel) so the request schema and the
+# /capabilities enum share one source.
+Language = Literal[("auto", *LANGUAGE_CODES)]
 
 
 class SynthesisRequest(BaseModel):
@@ -153,10 +161,11 @@ class SynthesisRequest(BaseModel):
         ),
     )
     language: Language | None = Field(
-        None,
+        DEFAULT_LANGUAGE,
         description=(
-            "Language name (e.g. 'english', 'chinese') or 'auto'.  Omit or "
-            "pass 'auto' for auto-detection."
+            "Two-letter language code, e.g. 'en', 'zh', or 'auto' for "
+            f"auto-detection (supported: {', '.join(sorted(LANGUAGE_CODES))}).  "
+            "Omitted or empty defaults to 'en'."
         ),
     )
     seed: int | None = Field(
@@ -203,6 +212,16 @@ class SynthesisRequest(BaseModel):
             raise ValueError("text must contain non-whitespace characters")
         return v
 
+    @field_validator("language", mode="before")
+    @classmethod
+    def _normalize_language(cls, v: object) -> str:
+        # docs/02: null/empty means English.  'mode=before' means ``v`` is
+        # the raw JSON value (pre-coercion): non-strings are rejected here
+        # as ValueError (422), never downstream as AttributeError (500).
+        # Runs before the Literal check so the normalized default ('en') is
+        # always a valid member.
+        return normalize_language(v)
+
 
 class SynthesisResponse(CoreSynthesisResponse):
     """The synthesis result (core fields from tts_engine_common, plus fid)."""
@@ -240,7 +259,7 @@ CAPABILITIES = build_capabilities(
             "omitted, cloning falls back to speaker-embedding-only mode."
         ),
     },
-    languages=sorted(LANGUAGE_NAMES),
+    languages=sorted(LANGUAGE_CODES),
     overrides={
         "x_vector_only_mode": {"advanced": True},
         "temperature": {"step": 0.05},
@@ -415,11 +434,16 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     # it, so we transparently switch to speaker-embedding-only cloning.
     x_vector_only = req.x_vector_only_mode or req.reference_text is None
 
+    # docs/02: the API speaks two-letter codes; the engine wants lowercase
+    # names.  'auto' passes through (the engine's own auto-detection mode).
+    engine_language = LANGUAGE_CODE_TO_NAME.get(req.language, req.language)
+
     logger.info(
-        "Synthesizing: seed={}, text_len={}, lang={}, x_vector_only={}",
+        "Synthesizing: seed={}, text_len={}, lang={} (engine: {}), x_vector_only={}",
         seed,
         len(req.text),
         req.language,
+        engine_language,
         x_vector_only,
     )
 
@@ -456,7 +480,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         torch.manual_seed(seed)
         wavs, sr = runtime.model.generate_voice_clone(
             text=req.text,
-            language=req.language,  # None -> engine's "Auto"
+            language=engine_language,  # e.g. 'en' -> 'english'; 'auto' passes through
             ref_audio=(ref_wav, ref_sr),
             ref_text=req.reference_text,
             x_vector_only_mode=x_vector_only,

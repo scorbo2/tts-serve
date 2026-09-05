@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "omnivoice",
   "model": "k2-fsa/OmniVoice",
   "device": "cuda",
@@ -69,8 +69,8 @@
       "name": "language",
       "type": "string",
       "required": false,
-      "default": null,
-      "description": "Language code (e.g. 'en') or name (e.g. 'English').  Omit for language-agnostic mode.",
+      "default": "en",
+      "description": "Two-letter language code, e.g. 'en' or 'fr'.  Omitted or empty defaults to 'en'.",
       "min": null,
       "max": null,
       "step": null,

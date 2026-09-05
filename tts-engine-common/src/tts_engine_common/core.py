@@ -7,7 +7,9 @@ import math
 
 # Bumped only for breaking changes to the capabilities document (see
 # docs/01-server-generification.md, section 3.5).
-SCHEMA_VERSION = 1
+# History: v2 (2026-09) — `language` contract solidified to two-letter codes
+# with null/empty -> 'en' normalization (docs/02-language-handling.md).
+SCHEMA_VERSION = 2
 
 # The "common" parameter vocabulary: the field names a client application may
 # assume exist by name when an engine advertises them. Anything outside this

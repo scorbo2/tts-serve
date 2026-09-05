@@ -126,6 +126,11 @@ def test_synthesize_unsupported_language_rejected(client):
     assert _post(client, payload).status_code == 422
 
 
+# The shared docs/02 language contract (case, names, garbage, non-strings,
+# null/empty -> 'en') is asserted once for every server in
+# test_language_contract.py; keep only engine-specific language tests here.
+
+
 def test_synthesize_seed_below_range_rejected(client):
     payload = _valid_payload()
     payload["seed"] = 0

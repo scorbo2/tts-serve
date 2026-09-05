@@ -67,11 +67,13 @@ from chatterbox.mtl_tts import (
     ChatterboxMultilingualTTS,
 )
 from tts_engine_common import (
+    DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
     compute_rtf,
     decode_base64,
+    normalize_language,
 )
 
 # ---------------------------------------------------------------------------
@@ -143,11 +145,11 @@ class SynthesisRequest(BaseModel):
         ),
     )
     language: Language | None = Field(
-        None,
+        DEFAULT_LANGUAGE,
         description=(
-            "Language code, e.g. 'en', 'fr', 'zh' "
-            f"(supported: {', '.join(SUPPORTED_LANGUAGES)}). "
-            "Omit to skip the language tag."
+            "Two-letter language code, e.g. 'en', 'fr', 'zh' "
+            f"(supported: {', '.join(SUPPORTED_LANGUAGES)}).  "
+            "Omitted or empty defaults to 'en'."
         ),
     )
     seed: int | None = Field(
@@ -211,6 +213,16 @@ class SynthesisRequest(BaseModel):
         if not v.strip():
             raise ValueError("text must contain non-whitespace characters")
         return v
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _normalize_language(cls, v: object) -> str:
+        # docs/02: null/empty means English.  'mode=before' means ``v`` is
+        # the raw JSON value (pre-coercion): non-strings are rejected here
+        # as ValueError (422), never downstream as AttributeError (500).
+        # Runs before the Literal check so the normalized default ('en') is
+        # always a valid member.
+        return normalize_language(v)
 
 
 class SynthesisResponse(CoreSynthesisResponse):
@@ -449,7 +461,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             seed_everything(seed)
             wav = runtime.model.generate(
                 text=req.text,
-                language_id=req.language,
+                language_id=req.language,  # always a code: null/empty normalized to 'en' (docs/02)
                 audio_prompt_path=prompt_audio_path,
                 exaggeration=req.exaggeration,
                 cfg_weight=req.cfg_weight,
