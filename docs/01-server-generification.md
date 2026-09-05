@@ -60,6 +60,8 @@ The only fields the app may *assume* exist:
 | `language` | string (enum) | `capabilities.languages` is non-null |
 | `seed` | integer | listed in `capabilities.parameters` |
 
+*The `language` row above is superseded by [docs/02-language-handling.md](02-language-handling.md): two-letter lowercase codes, null/empty → `en`, the `auto` sentinel where supported, `schema_version` 2.*
+
 Response core (already near-uniform across servers; **freeze it**): `audio_base64`, `sample_rate`, `seed` (echoed), `time_used`, `rtf`, plus engine extras (e.g. `fid`).
 
 Note the deliberately small core: `language` is *not* core (Chatterbox Turbo/Nano are English-only), `seed` is *not* core (declare it, don't assume it). The app must treat everything beyond `text` as "render if advertised."
@@ -161,6 +163,8 @@ Consequence: a field the engine doesn't know → `422` naming the field. **Pre-w
   ]
 }
 ```
+
+*The `language` entry in this v1 example predates docs/02 (it shows `"default": null`, "Omit to skip the language tag."); under the current contract it is `"default": "en"`, with null/empty normalized to `en`.*
 
 ### 4.2 Field reference
 

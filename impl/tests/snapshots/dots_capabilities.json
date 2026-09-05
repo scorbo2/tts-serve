@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "dots.tts",
   "model": "rednote-hilab/dots.tts-soar",
   "device": "cpu",
@@ -69,8 +69,8 @@
       "name": "language",
       "type": "string",
       "required": false,
-      "default": null,
-      "description": "Language code ('EN', 'ZH'), name ('english'), 'none', or 'auto_detect'.  Omit for no language tag.",
+      "default": "en",
+      "description": "Two-letter language code, e.g. 'en' or 'zh', or 'auto' for auto-detection.  Omitted or empty defaults to 'en'.",
       "min": null,
       "max": null,
       "step": null,

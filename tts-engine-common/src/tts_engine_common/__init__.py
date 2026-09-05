@@ -6,6 +6,12 @@ installs light, imports with no side effects, and tests on any dev box.
 
 from .core import CORE_FIELDS, SCHEMA_VERSION, compute_rtf, decode_base64
 from .derive import DerivationError, build_capabilities, spec_from_schema
+from .language import (
+    DEFAULT_LANGUAGE,
+    is_language_code,
+    normalize_language,
+    validate_language_code,
+)
 from .models import (
     Capabilities,
     CoreSynthesisResponse,
@@ -18,6 +24,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CORE_FIELDS",
+    "DEFAULT_LANGUAGE",
     "SCHEMA_VERSION",
     "Capabilities",
     "CoreSynthesisResponse",
@@ -30,5 +37,8 @@ __all__ = [
     "capabilities_endpoint",
     "compute_rtf",
     "decode_base64",
+    "is_language_code",
+    "normalize_language",
     "spec_from_schema",
+    "validate_language_code",
 ]

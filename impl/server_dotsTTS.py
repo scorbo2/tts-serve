@@ -57,10 +57,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from dots_tts.runtime import DotsTtsRuntime
 from dots_tts.utils.util import seed_everything
 from tts_engine_common import (
+    DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
     decode_base64,
+    normalize_language,
+    validate_language_code,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,10 +123,10 @@ class SynthesisRequest(BaseModel):
         ),
     )
     language: str | None = Field(
-        None,
+        DEFAULT_LANGUAGE,
         description=(
-            "Language code ('EN', 'ZH'), name ('english'), 'none', or "
-            "'auto_detect'.  Omit for no language tag."
+            "Two-letter language code, e.g. 'en' or 'zh', or 'auto' for "
+            "auto-detection.  Omitted or empty defaults to 'en'."
         ),
     )
     seed: int | None = Field(
@@ -167,6 +170,23 @@ class SynthesisRequest(BaseModel):
             raise ValueError("text must contain non-whitespace characters")
         return v
 
+    @field_validator("language", mode="before")
+    @classmethod
+    def _normalize_language(cls, v: object) -> str:
+        # docs/02: null/empty means English.  'mode=before' means ``v`` is
+        # the raw JSON value (pre-coercion): non-strings are rejected here
+        # as ValueError (422), never downstream as AttributeError (500).
+        return normalize_language(v)
+
+    @field_validator("language")
+    @classmethod
+    def _check_language(cls, v: str) -> str:
+        # docs/02: the API speaks two-letter codes; 'auto' is the
+        # auto-detection sentinel (mapped to the engine's 'auto_detect'
+        # before the model call).  The contract check itself lives in the
+        # shared helper — allow_auto=True keeps 'auto' legal here.
+        return validate_language_code(v, allow_auto=True)
+
 
 class SynthesisResponse(CoreSynthesisResponse):
     """The synthesis result (core fields from tts_engine_common, plus extras)."""
@@ -205,7 +225,7 @@ CAPABILITIES = build_capabilities(
             "transcript (reference_text) is optional but improves conditioning."
         ),
     },
-    languages=None,  # free-form: codes, names, 'none', 'auto_detect'
+    languages=None,  # no fixed list; two-letter codes + 'auto' (docs/02)
     overrides={
         "num_steps": {"step": 1},
         "guidance_scale": {"step": 0.1},
@@ -386,7 +406,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             num_steps=req.num_steps,
             guidance_scale=req.guidance_scale,
             speaker_scale=req.speaker_scale,
-            language=req.language,
+            language=_to_engine_language(req.language),
         )
 
         # The runtime computes time_used and rtf itself; rtf can be inf for
@@ -425,6 +445,17 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
 _TEMP_AUDIO_DIR = Path("/tmp/dots_tts_rest_api")
 _TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _to_engine_language(language: str) -> str:
+    """Map the API-level language value to the form the dots.tts runtime wants.
+
+    The runtime takes uppercase codes ('EN') or the 'auto_detect' sentinel;
+    the API contract (docs/02) is lowercase two-letter codes or 'auto'.
+    """
+    if language == "auto":
+        return "auto_detect"
+    return language.upper()
 
 
 def _check_reference_audio(raw_bytes: bytes) -> None:

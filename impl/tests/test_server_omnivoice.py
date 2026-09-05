@@ -34,9 +34,11 @@ def test_capabilities_matches_snapshot(client):
     assert doc == load_snapshot("omnivoice_capabilities.json")
 
 
-def test_capabilities_language_is_free_form(client):
-    # OmniVoice accepts any code or name (646 languages) — deliberately no
-    # enum in the schema, and languages=null in the capabilities document.
+def test_capabilities_language_has_no_enum(client):
+    # OmniVoice covers ~646 languages, so the schema deliberately carries no
+    # enum and the capabilities document no language list (the shared docs/02
+    # contract — codes, default 'en' — is asserted in
+    # test_language_contract.py).
     doc = client.get("/capabilities").json()
     assert doc["languages"] is None
     by_name = {p["name"]: p for p in doc["parameters"]}
@@ -148,6 +150,11 @@ def test_synthesize_seed_out_of_range_rejected(client):
     payload = _valid_payload()
     payload["seed"] = 1001
     assert _post(client, payload).status_code == 422
+
+
+# The shared docs/02 language contract (case, names, garbage, non-strings,
+# null/empty -> 'en') is asserted once for every server in
+# test_language_contract.py; keep only engine-specific language tests here.
 
 
 # ---------------------------------------------------------------------------

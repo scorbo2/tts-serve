@@ -32,6 +32,20 @@ Engine packages: `chatterbox-tts`, `omnivoice`, `qwen-tts`, `dots.tts`.
 The full parameter list for each server is at its `GET /capabilities` —
 don't trust this README over that endpoint, the schema is the source of truth.
 
+## Language handling
+
+Per [docs/02-language-handling.md](../docs/02-language-handling.md), the
+`language` contract is a **two-letter lowercase code** (`en`, `fr`, `de`,
+...); omitted or empty values are normalized to `en` at the request boundary
+(shared helpers in `tts_engine_common.language`). Engines whose internal
+format differs map it at their own server — the client never sees it:
+
+- **Qwen3-TTS** maps codes to lowercase names (`en` → `english`);
+- **dots.tts** maps codes to uppercase (`en` → `EN`).
+
+Engines with auto-detection expose it as the special value `auto`
+(Qwen3-TTS, dots.tts).
+
 ## Engine-specific notes
 
 - **Chatterbox** — no `reference_text` field: it conditions purely on the
@@ -40,13 +54,15 @@ don't trust this README over that endpoint, the schema is the source of truth.
 - **OmniVoice** — omitting `reference_text` triggers an on-the-fly Whisper
   transcription; the first such request pays the ASR model load. References
   over 20 s are trimmed at the largest silence gap.
-- **Qwen3-TTS** — `language` takes lowercase *names* (`english`, `chinese`,
-  ...) or `auto`. Omitting `reference_text` transparently enables
+- **Qwen3-TTS** — `language` takes two-letter codes (`en`, `zh`, ...) or
+  `auto` for auto-detection (mapped to the engine's lowercase names
+  internally). Omitting `reference_text` transparently enables
   speaker-embedding-only mode (`x_vector_only_mode`), since the engine's
   in-context mode hard-requires a transcript.
 - **dots.tts** — 48 kHz output (unlike the 24 kHz engines). The runtime
   demands a file path for the prompt audio, so the server writes a temp file;
-  the reference transcript is optional.
+  the reference transcript is optional. `language` takes two-letter codes or
+  `auto` (mapped to the engine's uppercase codes / `auto_detect`).
 
 ## Tests (`tests/`)
 

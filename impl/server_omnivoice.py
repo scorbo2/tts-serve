@@ -59,11 +59,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from omnivoice import OmniVoice, OmniVoiceGenerationConfig
 from omnivoice.utils.audio import load_audio_bytes
 from tts_engine_common import (
+    DEFAULT_LANGUAGE,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
     compute_rtf,
     decode_base64,
+    normalize_language,
+    validate_language_code,
 )
 
 # ---------------------------------------------------------------------------
@@ -142,10 +145,10 @@ class SynthesisRequest(BaseModel):
         ),
     )
     language: str | None = Field(
-        None,
+        DEFAULT_LANGUAGE,
         description=(
-            "Language code (e.g. 'en') or name (e.g. 'English').  Omit for "
-            "language-agnostic mode."
+            "Two-letter language code, e.g. 'en' or 'fr'.  Omitted or "
+            "empty defaults to 'en'."
         ),
     )
     seed: int | None = Field(
@@ -185,6 +188,22 @@ class SynthesisRequest(BaseModel):
         if not v.strip():
             raise ValueError("text must contain non-whitespace characters")
         return v
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _normalize_language(cls, v: object) -> str:
+        # docs/02: null/empty means English.  'mode=before' means ``v`` is
+        # the raw JSON value (pre-coercion): non-strings are rejected here
+        # as ValueError (422), never downstream as AttributeError (500).
+        return normalize_language(v)
+
+    @field_validator("language")
+    @classmethod
+    def _check_language_code(cls, v: str) -> str:
+        # The engine covers ~646 languages, so there is no enum to lean on —
+        # enforce the two-letter-code contract explicitly, so garbage like
+        # 'x?' 422s here instead of reaching the engine.
+        return validate_language_code(v)
 
 
 class SynthesisResponse(CoreSynthesisResponse):
@@ -226,7 +245,7 @@ CAPABILITIES = build_capabilities(
             "omitted, the clip is auto-transcribed with Whisper."
         ),
     },
-    languages=None,  # 646 languages; code or name, free-form
+    languages=None,  # ~646 languages: no practical enum; API contract is two-letter codes (docs/02)
     overrides={
         "num_steps": {"step": 4},
         "guidance_scale": {"step": 0.1},
