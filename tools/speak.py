@@ -585,12 +585,43 @@ def save_or_play(audio_bytes: bytes, output_file: str | None) -> None:
 
 
 def _format_stats(response: dict) -> str:
-    rtf = response.get("rtf")
-    return (
-        f"seed={response.get('seed')} "
-        f"time_used={response.get('time_used')}s "
-        f"rtf={'null' if rtf is None else rtf}"
+    """Render the synthesis response as a human-readable stats block.
+
+    One stat per indented line under a header; the continuous values
+    (time_used, rtf) are rounded to two decimal places.  The seed is an
+    integer and is shown whole rather than as 7.00 — the one-line
+    "seed=7 time_used=1.5s rtf=0.3" form this replaces was
+    machine-readable at best, which is precisely the point.
+    """
+    return "\n".join(
+        (
+            "Generation stats:",
+            f"  seed: {_format_seed(response.get('seed'))}",
+            f"  time_used: {_format_stat_value(response.get('time_used'), unit='s')}",
+            f"  rtf: {_format_stat_value(response.get('rtf'))}",
+        )
     )
+
+
+def _format_seed(value: object) -> str:
+    """Render the seed whole ('null' when the response omits it)."""
+    return "null" if value is None else str(value)
+
+
+def _format_stat_value(value: object, unit: str = "") -> str:
+    """Round a numeric stat to two decimals, appending an optional unit.
+
+    The unit is only attached to real numbers, so an absent time_used
+    renders as "null", not "nulls".  A value that is not numeric (a broken
+    server) is shown as-is: the synthesis already succeeded, so the stats
+    line must not crash the run.
+    """
+    if value is None:
+        return "null"
+    try:
+        return f"{float(value):.2f}{unit}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _format_number(value: object) -> str:

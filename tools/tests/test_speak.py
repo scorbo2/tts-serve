@@ -309,6 +309,79 @@ def test_validate_response_withValidBody_returnsBody():
 
 
 # ---------------------------------------------------------------------------
+# Stats formatting
+# ---------------------------------------------------------------------------
+
+
+def test_format_stats_withFullResponse_rendersHeaderAndOneStatPerLine():
+    # GIVEN a well-formed synthesis response
+    response = {"audio_base64": "AAAA", "seed": 42, "time_used": 3.689, "rtf": 0.1234}
+
+    # WHEN formatted for display
+    # THEN each stat gets its own indented line under a header, and the
+    #      continuous values are rounded to two decimal places
+    assert speak._format_stats(response) == (
+        "Generation stats:\n"
+        "  seed: 42\n"
+        "  time_used: 3.69s\n"
+        "  rtf: 0.12"
+    )
+
+
+def test_format_stats_withWholeSeconds_keepsTwoDecimals():
+    # GIVEN a response whose time_used is a whole number of seconds
+    response = {"seed": 7, "time_used": 3.0, "rtf": 0.5}
+
+    # WHEN formatted
+    # THEN time_used still carries the two-decimal contract (3.00s, not 3s)
+    assert speak._format_stats(response) == (
+        "Generation stats:\n"
+        "  seed: 7\n"
+        "  time_used: 3.00s\n"
+        "  rtf: 0.50"
+    )
+
+
+def test_format_stats_withNullRtf_rendersNull():
+    # GIVEN a response whose rtf is null (the response model allows it:
+    #      zero-length audio)
+    response = {"seed": 7, "time_used": 1.0, "rtf": None}
+
+    # WHEN formatted
+    # THEN rtf is shown as "null" — not "None", not "nulls", not a number
+    assert speak._format_stats(response) == (
+        "Generation stats:\n"
+        "  seed: 7\n"
+        "  time_used: 1.00s\n"
+        "  rtf: null"
+    )
+
+
+def test_format_stats_withAbsentStats_rendersNullsWithoutRaising():
+    # GIVEN a response missing the stats fields entirely (a broken server)
+    response = {"audio_base64": "AAAA"}
+
+    # WHEN formatted
+    # THEN the formatter degrades to "null" lines instead of crashing a run
+    #      that already succeeded
+    assert speak._format_stats(response) == (
+        "Generation stats:\n"
+        "  seed: null\n"
+        "  time_used: null\n"
+        "  rtf: null"
+    )
+
+
+def test_format_stats_withNonNumericStat_showsTheValueAsIs():
+    # GIVEN a response whose time_used is not a number (a broken server)
+    response = {"seed": 7, "time_used": "a long time", "rtf": 0.5}
+
+    # WHEN formatted
+    # THEN the value is shown as-is rather than raising in the formatter
+    assert "  time_used: a long time" in speak._format_stats(response)
+
+
+# ---------------------------------------------------------------------------
 # Capabilities -> argparse mapping (stage 2)
 # ---------------------------------------------------------------------------
 
@@ -652,9 +725,14 @@ def test_main_happyPath_savesFileLogsStatsAndReturnsZero(tmp_path, monkeypatch, 
         "http://10.0.0.5:8000/synthesize",
     ]
     out = capsys.readouterr().out
-    assert "seed=7" in out
-    assert "time_used=1.5s" in out
-    assert "rtf=0.3" in out
+    # Stats are a human-readable block: a header, one stat per indented line,
+    # and two-decimal rounding for the continuous values (spec: 'Output')
+    assert (
+        "Generation stats:\n"
+        "  seed: 7\n"
+        "  time_used: 1.50s\n"
+        "  rtf: 0.30\n"
+    ) in out
     assert "Saved audio to" in out
 
 
@@ -1056,7 +1134,9 @@ def test_main_whenAplayMissing_exits1AfterLoggingStats(tmp_path, monkeypatch, ca
 
     captured = capsys.readouterr()
     assert code == 1
-    assert "seed=7" in captured.out  # stats logged before the playback attempt failed
+    # stats (header and per-stat lines) logged before the playback attempt failed
+    assert "Generation stats:" in captured.out
+    assert "  seed: 7" in captured.out
     assert "'aplay' not found" in captured.err
 
 
