@@ -69,7 +69,7 @@ Use `argparse` for command-line argument handling.
 
 The new script's only known-in-advance parameters (`parse_known_args()`):
 
-- `--server`: (required! no default) The server URL (example: `http://10.0.0.5:8000`)
+- `--server`: (optional, but see Environment Variables section) The server URL (example: `http://10.0.0.5:8000`)
   **Note**: the old script required the full URL, with endpoint (example: `http://10.0.0.5:8000/synthesize`).
   This new script requires just the server name/IP and port. The endpoint is discovered from `/capabilities`.
 - `text` (required positional argument): any text to be synthesized.
@@ -172,14 +172,17 @@ the supplied reference text with a warning ("Reference text ignored as this serv
 It is always an error to omit `--ref-audio` (or `--persona-dir`, if `--ref-audio` is not specified).
 ALL tts-serve implementation scripts require `audio_base64`. So, even though both `--ref-audio`
 and `--persona-dir` are marked as optional arguments, at least one of them must be specified!
-Exit with status 1 and message "You must supply reference audio or a persona directory!"
+Exit with status 2 and message "You must supply reference audio or a persona directory!"
+Note that `--persona-dir` can also be specified by an environment variable. See the Environment
+Variables section for details.
 
 ## Persona Directory
 
-Instead of `--ref-audio` and `--ref-audio-transcript`, the user can supply `--persona-dir`,
-pointing to any directory. This directory should contain `ref.wav` representing the reference
-audio, and `ref.txt` representing the reference transcript. It is an error if either file is missing,
-or if the given directory does not exist or can't be read.
+Instead of `--ref-audio` and `--ref-audio-transcript`, the user can supply `--persona-dir`
+(or the `TTS_SPEAK_PERSONA_DIR` env var), pointing to any directory. This directory should
+contain `ref.wav` representing the reference audio, and `ref.txt` representing the reference
+transcript. It is an error if either file is missing, or if the given directory does not
+exist or can't be read.
 
 If both `--ref-audio` and `--persona-dir` are given, `--ref-audio` is ignored with a warning.
 
@@ -220,3 +223,88 @@ Normal logging and warnings to stdout, errors to stderr. User can redirect as ne
 `AGENTS.md` in this repo requires a full `python -m pytest tts-engine-common/tests impl/tests`
 after every code change, to ensure all tests are green. That instruction should be updated to
 include the tests for this script in the new `tools` directory.
+
+## Environment variables
+
+### Specifying server
+
+The `--server` command line argument is technically required (we can't discover capabilities
+without a TTS server), but must be marked as optional in argparse, as its value can come
+from two sources:
+
+- the `--server` command line argument itself
+- a `TTS_SPEAK_SERVER` environment variable
+
+At least one of these must be provided. The suggested approach is to check for the environment
+variable first, then allow the command line argument to override it:
+
+```
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--server",
+    required=False,
+    default=os.environ.get("TTS_SPEAK_SERVER"),
+)
+
+args = parser.parse_args()
+
+if args.server is None:
+    parser.error("the following arguments are required: --server")
+```
+
+To make this clear to the user, custom help text should be supplied, rather than relying
+on argparse's auto-generated text. Something like this:
+
+```
+help=(
+    "Server address. Required unless TTS_SPEAK_SERVER env var is set "
+    f"(currently: {os.environ.get('TTS_SPEAK_SERVER', 'not set')}). "
+    "Command-line value takes precedence. Note: supply base URL only. "
+    "The endpoint is discovered from /capabilities."
+),
+```
+
+If both the env var and the command line argument are specified, the command line arg wins.
+If neither is set, exit with code 2 and message: "the following arguments are required: --server"
+
+Note that the `--list-server-params` option should work regardless of whether the server
+is supplied via `--server` or via `TTS_SPEAK_SERVER`, as long as at least one is valid.
+Same precedence order applies: the command line arg wins if both are specified.
+
+**Error precedence**: missing server is reported before missing reference audio / missing text.
+
+### Specifying persona directory
+
+The `--persona-dir` argument will also have an environment variable fallback
+`TTS_SPEAK_PERSONA_DIR`. This env var will **only** apply when `--persona-dir` is not specified.
+The precedence order for this is:
+
+1. `--persona-dir` supersedes both `--ref-audio` and the env var.
+2. `--ref-audio` supersedes the env var, if `--persona-dir` is not specified.
+3. if neither `--persona-dir` nor `--ref-audio` is specified, use the value from
+   the environment variable as though it had been given to `--persona-dir`.
+4. if none of the above are specified, exit with code 2 and message
+   "You must supply reference audio or a persona directory!"
+
+If either env var is set to an empty/blank string, it should be treated as unset.
+
+### Notes for testing
+
+In order to keep the tests hermetic on a dev box that may have the environment variables specified,
+the tests should have an autouse fixture that strips both `TTS_SPEAK_*` env vars.
+
+In previous versions of this specification, `--server` was marked as required, so there are
+currently no explicit tests for missing server (we got it for free from argparse itself).
+Now that it is marked as optional, with custom rules around resolving a value of it,
+there should be new tests to cover these scenarios: neither env var nor command line arg supplied
+(should error), both env var and command line arg supplied (should ignore env var), empty
+env var supplied (should be treated as unset), only env var supplied (should use the env var value),
+only command line arg supplied (should use the command line arg).
+
+The same scenarios should be covered for TTS_SPEAK_PERSONA_DIR: both --persona-dir and the env var
+(use the flag, env var silently ignored); only --ref-audio with the env var set (use --ref-audio,
+env var silently ignored with no warning — this distinguishes an explicit flag from the env-var fallback);
+only the env var (resolved exactly as if given to --persona-dir, including the exit-1 validation errors
+for a bad path); empty env var (treated as unset); and none of --ref-audio, --persona-dir, or the env
+var (exit 2 — note the existing test currently asserts exit 1 and must be updated).
+
