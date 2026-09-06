@@ -134,6 +134,44 @@ def test_env_or_none_withValue_stripsSurroundingWhitespace(monkeypatch):
     assert speak._env_or_none(speak.SERVER_ENV_VAR) == "http://10.0.0.5:8000"
 
 
+@pytest.mark.parametrize("explicit", [None, "", "   "])
+def test_resolve_server_withUnsetOrBlankFlag_fallsBackToEnvVar(monkeypatch, explicit):
+    # GIVEN no --server (None) or a blank one, plus TTS_SPEAK_SERVER set
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env:8000")
+
+    # WHEN resolved
+    # THEN the env var's value wins: a blank flag is "as if not given"
+    assert speak._resolve_server(explicit) == "http://env:8000"
+
+
+@pytest.mark.parametrize("explicit", ["", "   "])
+def test_resolve_server_withBlankFlagAndBlankEnvVar_returnsNone(monkeypatch, explicit):
+    # GIVEN a blank --server and a blank TTS_SPEAK_SERVER
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "  ")
+
+    # WHEN resolved
+    # THEN None, so main() can raise the exit-2 usage error — and, crucially,
+    #      nothing schemeless can reach urlopen (regression: uncaught
+    #      ValueError 'unknown url type: /capabilities')
+    assert speak._resolve_server(explicit) is None
+
+
+def test_resolve_server_withNonBlankFlag_ignoresEnvVar(monkeypatch):
+    # GIVEN both the flag and the env var with different values
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env:8000")
+
+    # WHEN resolved
+    # THEN the command line wins (spec: "the command line arg wins")
+    assert speak._resolve_server("http://flag:8000") == "http://flag:8000"
+
+
+def test_resolve_server_withPaddedFlag_stripsWhitespace():
+    # GIVEN a --server value with accidental surrounding whitespace
+    # WHEN resolved
+    # THEN it comes back stripped, exactly like the env var's value
+    assert speak._resolve_server("  http://flag:8000  ") == "http://flag:8000"
+
+
 # ---------------------------------------------------------------------------
 # Stage-1 parser: --timeout, --server env-var fallback
 # ---------------------------------------------------------------------------
@@ -773,6 +811,108 @@ def test_main_withBlankServerEnvVar_treatsItAsUnset(monkeypatch, capsys):
         speak.main(["Hello", "--ref-audio", "a.wav"])
     assert excinfo.value.code == 2
     assert "the following arguments are required: --server" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_main_withBlankServerFlag_treatsItAsUnset(monkeypatch, capsys, blank):
+    # GIVEN --server supplied with an empty/whitespace-only value and no
+    #      TTS_SPEAK_SERVER (the conftest fixture strips ambient values)
+    # WHEN main runs
+    # THEN the blank value is treated as unset: the spec's exit-2 usage error,
+    #      not an uncaught ValueError from urlopen (regression: 'unknown url
+    #      type: /capabilities')
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello", "--server", blank, "--ref-audio", "a.wav"])
+    assert excinfo.value.code == 2
+    assert "the following arguments are required: --server" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "192.168.1.50",  # bare IP: the classic 'forgot http://' typo
+        "localhost:9",   # a colon, but no scheme
+        "relative/path",
+        "/capabilities",
+    ],
+)
+def test_main_withSchemelessServerValue_exits2WithSchemeHint(monkeypatch, capsys, garbage):
+    # GIVEN a --server value with no scheme: without the check, the no-colon
+    #      values die deep inside urllib with an uncaught ValueError and the
+    #      colon value with the baffling 'Failed to connect to server:
+    #      unknown url type: localhost'
+    # WHEN main runs
+    # THEN an exit-2 usage error naming the expected shape, before any
+    #      network traffic
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello", "--server", garbage, "--ref-audio", "a.wav"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "server URL must include a scheme" in err
+    assert "http://host:port" in err
+
+
+def test_main_withBlankServerFlagAndEnvVar_fallsBackToEnvVar(tmp_path, monkeypatch):
+    # GIVEN --server blank (treated as unset, i.e. as if the flag were not
+    #      given at all) and TTS_SPEAK_SERVER set
+    caps = _caps("chatterbox_capabilities.json")
+    urls: list[str] = []
+    _stub_network(monkeypatch, caps, _ok_response(), {}, urls)
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env.example:8000")
+    (tmp_path / "a.wav").write_bytes(b"REF")
+
+    # WHEN synthesizing with the blank flag
+    code = speak.main(
+        ["Hello", "--server", "   ", "--ref-audio", str(tmp_path / "a.wav"),
+         "--output-file", str(tmp_path / "o.wav")]
+    )
+
+    # THEN the env var's server is used, exactly as if the flag were absent
+    assert code == 0
+    assert urls == [
+        "http://env.example:8000/capabilities",
+        "http://env.example:8000/synthesize",
+    ]
+
+
+def test_main_withBlankServerFlagAndListServerParams_queriesEnvVar(monkeypatch):
+    # GIVEN a blank --server and TTS_SPEAK_SERVER set
+    caps = _caps("dots_capabilities.json")
+    urls: list[str] = []
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env.example:8000")
+    monkeypatch.setattr(speak, "fetch_json", lambda url, timeout: (urls.append(url), caps)[1])
+
+    # WHEN the user asks for the parameter listing
+    # THEN the listing works and queries the env var's URL (spec: listing must
+    #      work with either source)
+    code = speak.main(["--server", "", "--list-server-params"])
+
+    assert code == 0
+    assert urls == ["http://env.example:8000/capabilities"]
+
+
+def test_main_withPaddedServerFlag_stripsWhitespace(tmp_path, monkeypatch):
+    # GIVEN a --server value with accidental surrounding whitespace (the same
+    #      case _env_or_none absorbs for the env var)
+    caps = _caps("chatterbox_capabilities.json")
+    urls: list[str] = []
+    _stub_network(monkeypatch, caps, _ok_response(), {}, urls)
+    (tmp_path / "a.wav").write_bytes(b"REF")
+
+    # WHEN synthesizing
+    code = speak.main(
+        ["Hello", "--server", "  http://flag.example:8000  ", "--ref-audio", str(tmp_path / "a.wav"),
+         "--output-file", str(tmp_path / "o.wav")]
+    )
+
+    # THEN both requests go to the stripped URL — the second one in particular
+    #      proves stage-2 re-parsing did not resurrect the padded value for
+    #      join_url (it would have died in urlopen with an uncaught ValueError)
+    assert code == 0
+    assert urls == [
+        "http://flag.example:8000/capabilities",
+        "http://flag.example:8000/synthesize",
+    ]
 
 
 def test_main_withOnlyServerEnvVar_andListServerParams_queriesEnvValue(monkeypatch):

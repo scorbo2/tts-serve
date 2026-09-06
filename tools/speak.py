@@ -141,6 +141,22 @@ def _env_or_none(name: str) -> str | None:
     return value or None
 
 
+def _resolve_server(explicit_server: str | None) -> str | None:
+    """Resolve the effective server URL from the --server flag (spec: 'Specifying server').
+
+    The same blank-is-unset rule as TTS_SPEAK_SERVER applies to the flag:
+    a blank or missing value falls through to the env var.  Without this, a
+    bare ``--server ""`` sails past the ``is None`` check in main() and dies
+    deep inside urlopen with an uncaught ``ValueError: unknown url type:
+    '/capabilities'`` — a schemeless URL, i.e. the bug this function exists
+    to prevent.  Stripping also absorbs the accidental-padding case.
+    """
+    value = (explicit_server or "").strip()
+    if value:
+        return value
+    return _env_or_none(SERVER_ENV_VAR)
+
+
 def load_audio_base64(path: str) -> str:
     """Read an audio file and return its base64 encoding (the wire format)."""
     try:
@@ -664,11 +680,23 @@ def main(argv: list[str] | None = None) -> int:
     # (flag or TTS_SPEAK_SERVER) must be resolved here — before even the
     # --list-server-params short-circuit, which needs the URL — and per the
     # spec's 'Error precedence' a missing server is reported before any other
-    # usage error.
+    # usage error.  _resolve_server applies the blank-is-unset rule to the
+    # flag itself: a bare ``--server ""`` must fall through to the env var or
+    # the usage error below, never reach join_url().
     parser = build_base_parser()
     args, _unknown = parser.parse_known_args(argv)
+    args.server = _resolve_server(args.server)
     if args.server is None:
         parser.error("the following arguments are required: --server")
+    elif "://" not in args.server:
+        # Without a scheme, urllib either raises an uncaught ValueError
+        # (no colon at all: 'unknown url type: ...') or a baffling 'Failed
+        # to connect to server: unknown url type: localhost' (colon, no
+        # scheme). Both are worse than telling the user the expected shape
+        # of the value.
+        parser.error(
+            f"server URL must include a scheme, e.g. http://host:port (got {args.server!r})"
+        )
 
     # Discovery only: no text, no reference audio, no synthesis.
     if args.list_server_params:
@@ -709,6 +737,12 @@ def main(argv: list[str] | None = None) -> int:
     # Stage 2, same parser object: re-parses the entire command line strictly,
     # so engine-specific typos and type errors now exit 2.
     args = parser.parse_args(argv)
+    # Stage 2 re-parsed the raw command line, so args.server is the un-
+    # normalized flag value again (a blank or padded one would reach join_url
+    # below and die in urlopen).  Re-resolve; stage 1 proved it is resolvable
+    # and scheme-bearing, so for a stable environment this cannot return None
+    # nor a value the check above would have rejected.
+    args.server = _resolve_server(args.server)
 
     try:
         # persona_dir is the *resolved* value (flag, or env-var fallback), not
