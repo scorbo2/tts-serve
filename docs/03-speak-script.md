@@ -208,6 +208,19 @@ All `tts-serve` implementation scripts return `seed`, `time_used`, and `rtf`. Th
 be logged regardless of the output destination of the audio. Log this before attempting
 to play/save the audio! Otherwise, it may get skipped if audio output or save fails.
 
+The stats should be logged in a human-readable block: a `Generation stats:` header line,
+followed by one indented line per stat. `time_used` and `rtf` are rounded to two decimal
+places (with the `s` unit suffix on `time_used`); the seed is an integer and is shown
+whole. Absent or non-numeric values are shown as `null` / as-is rather than crashing the
+run after a successful synthesis. For example:
+
+```
+Generation stats:
+  seed: 42
+  time_used: 3.69s
+  rtf: 0.12
+```
+
 ## Logging
 
 Normal logging and warnings to stdout, errors to stderr. User can redirect as needed.
