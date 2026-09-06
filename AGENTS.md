@@ -3,7 +3,7 @@
 ## Commands (run from repo root)
 
 - Full test suite (no torch, GPU, or engine packages needed — verified on a bare dev box):
-  `python -m pytest tts-engine-common/tests/ impl/tests/`
+  `python -m pytest tts-engine-common/tests/ impl/tests/ tools/tests/`
 - Single test: plain pytest, e.g. `python -m pytest impl/tests/test_server_omnivoice.py -k seed`
 - After changing a server's request schema or engine constants, regenerate snapshots and review the diff:
   `python impl/tests/update_snapshots.py`
@@ -16,6 +16,7 @@
 - `tts-engine-common/` — shared FastAPI + Pydantic package. Design constraint: **no torch, no engine deps** — it must stay importable and testable on any box (see `pyproject.toml` comment and `docs/01-server-generification.md` D7).
 - `impl/` — four standalone FastAPI server scripts, one per engine: `server_chatterbox.py`, `server_omnivoice.py`, `server_qwen3TTS.py`, `server_dotsTTS.py`. Run via `python impl/server_<name>.py` or uvicorn; env config is documented in each module's docstring.
 - `impl/tests/` — GPU-free test suite + committed `/capabilities` snapshots (`snapshots/`).
+- `tools/` — `speak.py`, a command-line testing tool for any engine server: stdlib-only (no torch, no engine deps, no need to install `tts-engine-common`), discovers engine parameters from `GET /capabilities`. GPU-free tests in `tools/tests/` (network and aplay stubbed). Spec: `docs/03-speak-script.md`.
 - `docs/` — design docs; `01-server-generification.md` contains the binding decisions (D1–D7).
 
 ## Architecture facts that change how you work

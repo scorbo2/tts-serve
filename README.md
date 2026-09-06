@@ -116,7 +116,32 @@ python -m pytest tts-engine-common/tests/ impl/tests/
 python impl/tests/update_snapshots.py
 ```
 
+## Testing
+
+In addition to a full suite of unit tests, manual testing is possible via
+REST calls using `curl` or some Postman-like tool against a running `tts-serve` instance:
+
+```
+curl http://localhost:8000/health # shows basic server information including server type
+curl http://localhost:8000/capabilities # full capabilities list in Json format
+```
+
+Actual speech generation is better handled via the `speak.py` script,
+available in the `tools` directory:
+
+```
+python3 speak.py -h # show general help
+python3 speak-py --server http://localhost:8000 --list-server-params # inspect capabilities
+```
+
 ## Documentation
 
-- [`docs/00-project-overview.md`](docs/00-project-overview.md) — goals and the common vocabulary
+This project is built with spec-driven development. The human comes up with a detailed spec,
+and the LLM (Qwen 3.8 27B mostly) does the actual implementation. The specs are stored here
+for archeological purposes - the code is always the ultimate source of truth, and may drift
+over time from these original documents.
+
+- [`docs/00-project-overview.md`](docs/00-project-overview.md) — project goals and the common vocabulary
 - [`docs/01-server-generification.md`](docs/01-server-generification.md) — `/capabilities` design and open questions
+- [`docs/02-language-handling.md`](docs/02-language-handling.md) — Amendments to `language` parameter handling
+- [`docs/03-speak-script.md`](docs/03-speak-script.md) — addition of a handy command-line testing tool
