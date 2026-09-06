@@ -119,7 +119,7 @@ python impl/tests/update_snapshots.py
 ## Testing
 
 In addition to a full suite of unit tests, manual testing is possible via
-REST calls using `curl` or some Postman-like took against a running `tts-serve` instance:
+REST calls using `curl` or some Postman-like tool against a running `tts-serve` instance:
 
 ```
 curl http://localhost:8000/health # shows basic server information including server type
