@@ -28,7 +28,7 @@ Configuration (environment variables):
 
 Extra dependencies beyond the dots.tts package:
     pip install fastapi uvicorn loguru soundfile
-    pip install tts-engine-common    # or: pip install -e ../tts-engine-common
+    pip install ../tts-engine-common # in-repo copy; or: pip install -e ../tts-engine-common
 
 Usage:
     python server_dotsTTS.py
