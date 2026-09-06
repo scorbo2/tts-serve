@@ -24,7 +24,7 @@ All servers also take `*_HOST` (default `0.0.0.0`) and `*_PORT`
 
 ```bash
 pip install <engine-package> fastapi uvicorn loguru soundfile
-pip install tts-engine-common        # or: pip install -e ../tts-engine-common
+pip install ../tts-engine-common     # in-repo copy; or: pip install -e ../tts-engine-common
 python server_chatterbox.py          # or: uvicorn server_chatterbox:app
 ```
 

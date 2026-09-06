@@ -30,18 +30,24 @@ and the client can build its UI dynamically from `/capabilities`.
 
 ## Quickstart
 
-Each server is a standalone script. Install the engine package plus the
-shared bits, then run:
+The servers in `impl/` are standalone scripts built on the shared
+`tts-engine-common` package — both live in this repo, so start from a clone:
 
 ```bash
+git clone https://github.com/scorbo2/tts-serve && cd tts-serve
+pip install ./tts-engine-common
 pip install chatterbox-tts fastapi uvicorn loguru soundfile
-pip install tts-engine-common   # or: pip install -e ./tts-engine-common
 python impl/server_chatterbox.py
 ```
 
 (Replace `chatterbox-tts` with `omnivoice`, `qwen-tts`, or `dots.tts` and
 `server_chatterbox.py` with the matching file for the other engines. On first
 start the model weights download from HuggingFace.)
+
+The install commands assume an active virtual environment (e.g.
+`python3 -m venv .venv && source .venv/bin/activate`), or your existing
+conda setup. If you run more than one engine, give each one its own
+environment — their dependency trees will conflict.
 
 Then talk to it:
 
