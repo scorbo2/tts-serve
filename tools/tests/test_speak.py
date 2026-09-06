@@ -105,12 +105,37 @@ def test_load_transcript_withMessyWhitespace_collapsesToSingleSpaces(tmp_path):
 def test_load_transcript_withNonUtf8File_raisesSpeakError(tmp_path):
     path = tmp_path / "ref.txt"
     path.write_bytes(b"\xff\xfe\x00binary")
-    with pytest.raises(speak.SpeakError, match="could not be read as UTF-8"):
+    with pytest.raises(speak.SpeakError, match=r"could not be read as UTF-8"):
         speak.load_transcript(str(path))
 
 
+def test_env_or_none_withUnsetVariable_returnsNone():
+    # GIVEN TTS_SPEAK_SERVER unset (the conftest fixture guarantees this)
+    # WHEN read via _env_or_none
+    # THEN it yields None, the "unset" signal the callers check for
+    assert speak._env_or_none(speak.SERVER_ENV_VAR) is None
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_env_or_none_withBlankVariable_returnsNone(monkeypatch, value):
+    # GIVEN the variable set to an empty or whitespace-only string
+    # WHEN read
+    # THEN it is treated as unset (spec: blank values must not masquerade as
+    #      a configured value and die later as 'Failed to connect')
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, value)
+    assert speak._env_or_none(speak.SERVER_ENV_VAR) is None
+
+
+def test_env_or_none_withValue_stripsSurroundingWhitespace(monkeypatch):
+    # GIVEN the variable set to a value with accidental padding
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "  http://10.0.0.5:8000  ")
+    # WHEN read
+    # THEN the value comes back stripped
+    assert speak._env_or_none(speak.SERVER_ENV_VAR) == "http://10.0.0.5:8000"
+
+
 # ---------------------------------------------------------------------------
-# Stage-1 parser: --timeout
+# Stage-1 parser: --timeout, --server env-var fallback
 # ---------------------------------------------------------------------------
 
 
@@ -135,6 +160,49 @@ def test_build_base_parser_withValidTimeout_parsesIt():
         ["Hi", "--server", "http://x", "--ref-audio", "a.wav", "--timeout", "30"]
     )
     assert args.timeout == 30
+
+
+def test_build_base_parser_withoutServerFlag_defaultsToEnvVar(monkeypatch):
+    # GIVEN TTS_SPEAK_SERVER set and no --server on the command line
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env:8000")
+    parser = speak.build_base_parser()
+
+    # WHEN stage-1 parsing runs
+    # THEN the env var value becomes the argument's value
+    args, _ = parser.parse_known_args(["Hello"])
+    assert args.server == "http://env:8000"
+
+
+def test_build_base_parser_withServerFlagAndEnvVar_flagWins(monkeypatch):
+    # GIVEN both the env var and an explicit --server
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env:8000")
+    parser = speak.build_base_parser()
+
+    # WHEN the command line supplies --server
+    # THEN the command line wins (spec: "the command line arg wins")
+    args, _ = parser.parse_known_args(["Hello", "--server", "http://flag:8000"])
+    assert args.server == "http://flag:8000"
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected_annotation"),
+    [("http://10.0.0.5:8000", "http://10.0.0.5:8000"), ("   ", "not set")],
+)
+def test_build_base_parser_withServerEnvVar_helpShowsCurrentValue(
+    monkeypatch, capsys, env_value, expected_annotation
+):
+    # GIVEN the env var set (or blank, which the spec treats as unset)
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, env_value)
+    parser = speak.build_base_parser()
+
+    # WHEN --help is rendered
+    # THEN the custom help names the variable and shows its current value
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "TTS_SPEAK_SERVER" in out
+    assert expected_annotation in out
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +459,35 @@ def test_build_payload_withoutTranscript_omitsReferenceText():
 # ---------------------------------------------------------------------------
 
 
+def test_resolve_persona_dir_withExplicitFlag_ignoresRefAudioAndEnvVar():
+    # GIVEN --persona-dir explicitly given, plus --ref-audio and the env var
+    # WHEN resolved
+    # THEN the flag wins (spec precedence rule 1)
+    assert speak.resolve_persona_dir("/flag", "/ref.wav", "/env") == "/flag"
+
+
+def test_resolve_persona_dir_withRefAudioOnly_ignoresEnvVar():
+    # GIVEN no explicit --persona-dir, but --ref-audio and the env var
+    # WHEN resolved
+    # THEN no persona dir is used and the env var is silently ignored
+    #      (spec rule 2 — the case a naive argparse default gets wrong)
+    assert speak.resolve_persona_dir(None, "/ref.wav", "/env") is None
+
+
+def test_resolve_persona_dir_withOnlyEnvVar_returnsIt():
+    # GIVEN neither reference flag, but the env var is set
+    # WHEN resolved
+    # THEN it is used "as though it had been given to --persona-dir" (rule 3)
+    assert speak.resolve_persona_dir(None, None, "/env") == "/env"
+
+
+def test_resolve_persona_dir_withNoSourceAtAll_returnsNone():
+    # GIVEN nothing from flag or env var
+    # WHEN resolved
+    # THEN None, so the caller can raise the spec's exit-2 usage error
+    assert speak.resolve_persona_dir(None, None, None) is None
+
+
 def _make_persona(directory: Path, audio: bytes = b"WAV", transcript: str = "ref words") -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "ref.wav").write_bytes(audio)
@@ -575,16 +672,18 @@ def test_main_withTranscriptOnServerWithReferenceText_sendsCollapsedText(tmp_pat
     assert seen["reference_text"] == "words here"
 
 
-def test_main_withNoReferenceAudioAtAll_exits1BeforeAnyNetworkCall(monkeypatch, capsys):
-    # GIVEN no --ref-audio and no --persona-dir
+def test_main_withNoReferenceAudioAtAll_exits2BeforeAnyNetworkCall(monkeypatch, capsys):
+    # GIVEN no --ref-audio, no --persona-dir, and no TTS_SPEAK_PERSONA_DIR
+    #      (the conftest fixture strips any ambient value)
     called = []
     monkeypatch.setattr(speak, "fetch_json", lambda url, timeout: called.append(url))
 
     # WHEN main runs
-    code = speak.main(["Hello", "--server", "http://x"])
-
-    # THEN it fails locally (exit 1, spec's message) without touching the network
-    assert code == 1
+    # THEN it fails locally (exit 2 per spec, argparse framing) without
+    #      touching the network
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello", "--server", "http://x"])
+    assert excinfo.value.code == 2
     assert called == []
     assert "You must supply reference audio or a persona directory!" in capsys.readouterr().err
 
@@ -626,6 +725,139 @@ def test_main_withUnreachableServer_exits1(tmp_path, monkeypatch, capsys):
 
     assert code == 1
     assert "Failed to connect to server" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# End-to-end main(): --server / TTS_SPEAK_SERVER
+# ---------------------------------------------------------------------------
+
+
+def test_main_withNoServerAnywhere_exits2WithArgparseMessage(monkeypatch, capsys):
+    # GIVEN no --server and no TTS_SPEAK_SERVER (fixture strips ambient values)
+    # WHEN main runs
+    # THEN argparse reports the missing requirement (exit 2, spec's message)
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello", "--ref-audio", "a.wav"])
+    assert excinfo.value.code == 2
+    assert "the following arguments are required: --server" in capsys.readouterr().err
+
+
+def test_main_withNoServerAndNoRefAudio_reportsMissingServerFirst(monkeypatch, capsys):
+    # GIVEN text, but neither a server nor any reference source
+    # WHEN main runs
+    # THEN the server error precedes the reference-audio error (spec:
+    #      'Error precedence')
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello"])
+    assert excinfo.value.code == 2
+    assert "the following arguments are required: --server" in capsys.readouterr().err
+
+
+def test_main_withNoServerAndNoText_reportsMissingServerFirst(monkeypatch, capsys):
+    # GIVEN reference audio, but neither a server nor text
+    # WHEN main runs
+    # THEN the server error precedes the missing-text error
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["--ref-audio", "a.wav"])
+    assert excinfo.value.code == 2
+    assert "the following arguments are required: --server" in capsys.readouterr().err
+
+
+def test_main_withBlankServerEnvVar_treatsItAsUnset(monkeypatch, capsys):
+    # GIVEN TTS_SPEAK_SERVER set to whitespace only
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "   ")
+
+    # WHEN main runs with no --server
+    # THEN the blank value is treated as unset: the spec's exit-2 usage error
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello", "--ref-audio", "a.wav"])
+    assert excinfo.value.code == 2
+    assert "the following arguments are required: --server" in capsys.readouterr().err
+
+
+def test_main_withOnlyServerEnvVar_andListServerParams_queriesEnvValue(monkeypatch):
+    # GIVEN the server only via the env var
+    caps = _caps("dots_capabilities.json")
+    urls: list[str] = []
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env.example:8000")
+    monkeypatch.setattr(speak, "fetch_json", lambda url, timeout: (urls.append(url), caps)[1])
+
+    # WHEN the user asks for the parameter listing (no --server on the CLI)
+    # THEN the listing works and queries the env var's URL (spec: listing must
+    #      work with either source)
+    code = speak.main(["--list-server-params"])
+
+    assert code == 0
+    assert urls == ["http://env.example:8000/capabilities"]
+
+
+def test_main_withOnlyServerEnvVar_sendsRequestToEnvValue(tmp_path, monkeypatch):
+    caps = _caps("chatterbox_capabilities.json")
+    seen, urls = {}, []
+    _stub_network(monkeypatch, caps, _ok_response(), seen, urls)
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env.example:8000")
+    (tmp_path / "a.wav").write_bytes(b"REF")
+
+    # WHEN synthesizing with --server absent from the command line
+    code = speak.main(
+        ["Hello", "--ref-audio", str(tmp_path / "a.wav"), "--output-file", str(tmp_path / "o.wav")]
+    )
+
+    # THEN both requests go to the env var's server
+    assert code == 0
+    assert urls == [
+        "http://env.example:8000/capabilities",
+        "http://env.example:8000/synthesize",
+    ]
+
+
+def test_main_withServerEnvVarAndFlag_prefersFlag(tmp_path, monkeypatch):
+    caps = _caps("chatterbox_capabilities.json")
+    urls: list[str] = []
+    _stub_network(monkeypatch, caps, _ok_response(), {}, urls)
+    monkeypatch.setenv(speak.SERVER_ENV_VAR, "http://env.example:8000")
+    (tmp_path / "a.wav").write_bytes(b"REF")
+
+    # WHEN both the env var and the command line supply a server
+    code = speak.main(
+        [
+            "Hello",
+            "--server", "http://flag.example:8000",
+            "--ref-audio", str(tmp_path / "a.wav"),
+            "--output-file", str(tmp_path / "o.wav"),
+        ]
+    )
+
+    # THEN the command line wins and the env var's server is never contacted
+    assert code == 0
+    assert urls == [
+        "http://flag.example:8000/capabilities",
+        "http://flag.example:8000/synthesize",
+    ]
+
+
+def test_main_withOnlyServerFlag_usesFlagValue(tmp_path, monkeypatch):
+    # GIVEN no env var (the conftest fixture strips it): the flag is the sole
+    #      source
+    caps = _caps("chatterbox_capabilities.json")
+    urls: list[str] = []
+    _stub_network(monkeypatch, caps, _ok_response(), {}, urls)
+    (tmp_path / "a.wav").write_bytes(b"REF")
+
+    code = speak.main(
+        [
+            "Hello",
+            "--server", "http://flag.example:8000",
+            "--ref-audio", str(tmp_path / "a.wav"),
+            "--output-file", str(tmp_path / "o.wav"),
+        ]
+    )
+
+    assert code == 0
+    assert urls == [
+        "http://flag.example:8000/capabilities",
+        "http://flag.example:8000/synthesize",
+    ]
 
 
 def test_main_withUnrecognizedEngineArg_exits2(tmp_path, monkeypatch):
@@ -761,6 +993,103 @@ def test_main_withPersonaDirAndIndividualFlags_warnsAboutIgnoredFlags(tmp_path, 
     out = capsys.readouterr().out
     assert "Warning: --ref-audio ignored because --persona-dir was given." in out
     assert "Warning: --ref-audio-transcript ignored because --persona-dir was given." in out
+
+
+# ---------------------------------------------------------------------------
+# End-to-end main(): --persona-dir / TTS_SPEAK_PERSONA_DIR
+# ---------------------------------------------------------------------------
+
+
+def test_main_withPersonaDirFlagAndEnvVar_prefersFlag(tmp_path, monkeypatch):
+    # GIVEN both an explicit --persona-dir and TTS_SPEAK_PERSONA_DIR, each
+    #      pointing at a persona with different content
+    caps = _caps("dots_capabilities.json")
+    seen = {}
+    _stub_network(monkeypatch, caps, _ok_response(), seen)
+    monkeypatch.setattr(speak, "run_aplay", lambda audio: True)
+    flag_persona = _make_persona(tmp_path / "flag", audio=b"FLAG", transcript="flag words")
+    env_persona = _make_persona(tmp_path / "env", audio=b"ENV", transcript="env words")
+    monkeypatch.setenv(speak.PERSONA_DIR_ENV_VAR, str(env_persona))
+
+    # WHEN main runs with the explicit flag
+    # THEN the flag's persona is used and the env var is silently ignored
+    #      (spec rule 1)
+    code = speak.main(["Hello", "--server", "http://x", "--persona-dir", str(flag_persona)])
+
+    assert code == 0
+    assert base64.b64decode(seen["audio_base64"]) == b"FLAG"
+    assert seen["reference_text"] == "flag words"
+
+
+def test_main_withRefAudioAndPersonaEnvVar_usesRefAudioWithoutWarning(tmp_path, monkeypatch, capsys):
+    # GIVEN TTS_SPEAK_PERSONA_DIR set, but the user supplied only --ref-audio
+    caps = _caps("chatterbox_capabilities.json")  # no reference_text: simple payload
+    seen = {}
+    _stub_network(monkeypatch, caps, _ok_response(), seen)
+    monkeypatch.setattr(speak, "run_aplay", lambda audio: True)
+    env_persona = _make_persona(tmp_path / "env", audio=b"ENV")
+    monkeypatch.setenv(speak.PERSONA_DIR_ENV_VAR, str(env_persona))
+    (tmp_path / "a.wav").write_bytes(b"REF")
+
+    # WHEN main runs
+    # THEN --ref-audio is used and the env var is ignored *silently* — no
+    #      "ignored because --persona-dir was given" warning (spec rule 2;
+    #      this is the case a naive argparse default gets wrong)
+    code = speak.main(["Hello", "--server", "http://x", "--ref-audio", str(tmp_path / "a.wav")])
+
+    assert code == 0
+    assert base64.b64decode(seen["audio_base64"]) == b"REF"
+    assert "ignored" not in capsys.readouterr().out
+
+
+def test_main_withOnlyPersonaEnvVar_resolvesLikeExplicitFlag(tmp_path, monkeypatch):
+    # GIVEN TTS_SPEAK_PERSONA_DIR set and no reference flags at all
+    caps = _caps("dots_capabilities.json")  # advertises reference_text
+    seen = {}
+    _stub_network(monkeypatch, caps, _ok_response(), seen)
+    monkeypatch.setattr(speak, "run_aplay", lambda audio: True)
+    persona = _make_persona(tmp_path / "env", audio=b"PERSONA", transcript="env words")
+    monkeypatch.setenv(speak.PERSONA_DIR_ENV_VAR, str(persona))
+
+    # WHEN main runs
+    # THEN the persona dir is resolved exactly as if the flag had been given
+    #      (spec rule 3)
+    code = speak.main(["Hello", "--server", "http://x"])
+
+    assert code == 0
+    assert base64.b64decode(seen["audio_base64"]) == b"PERSONA"
+    assert seen["reference_text"] == "env words"
+
+
+def test_main_withPersonaEnvVarPointingAtMissingDir_exits1LikeExplicitFlag(
+    tmp_path, monkeypatch, capsys
+):
+    # GIVEN TTS_SPEAK_PERSONA_DIR naming a directory that does not exist
+    caps = _caps("dots_capabilities.json")
+    monkeypatch.setattr(speak, "fetch_json", lambda url, timeout: caps)
+    monkeypatch.setenv(speak.PERSONA_DIR_ENV_VAR, str(tmp_path / "nope"))
+
+    # WHEN main runs with no reference flags
+    # THEN the env-var persona goes through the same validation as an
+    #      explicit --persona-dir: exit 1, same message (spec rule 3,
+    #      "as though it had been given")
+    code = speak.main(["Hello", "--server", "http://x"])
+
+    assert code == 1
+    assert "Persona directory does not exist or is not a directory" in capsys.readouterr().err
+
+
+def test_main_withBlankPersonaEnvVar_treatsItAsUnset(tmp_path, monkeypatch, capsys):
+    # GIVEN TTS_SPEAK_PERSONA_DIR set to whitespace only and no reference flags
+    monkeypatch.setenv(speak.PERSONA_DIR_ENV_VAR, "   ")
+    monkeypatch.setattr(speak, "fetch_json", lambda url, timeout: None)
+
+    # WHEN main runs
+    # THEN the blank value is treated as unset: the spec's exit-2 usage error
+    with pytest.raises(SystemExit) as excinfo:
+        speak.main(["Hello", "--server", "http://x"])
+    assert excinfo.value.code == 2
+    assert "You must supply reference audio or a persona directory!" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

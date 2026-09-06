@@ -14,6 +14,10 @@ Usage:
         --persona-dir ./alice --language fr --output-file greeting.wav
     python tools/speak.py --server http://10.0.0.5:8000 --list-server-params
 
+`--server` and `--persona-dir` may also come from the TTS_SPEAK_SERVER and
+TTS_SPEAK_PERSONA_DIR environment variables; an explicit flag always wins,
+and blank values are treated as unset.
+
 Standard library only, on purpose: this must run on any client box, even
 without tts-engine-common (or torch) installed.
 
@@ -67,6 +71,11 @@ _RESERVED_FLAGS = frozenset(
     )
 )
 
+# Environment-variable fallbacks for two flags (spec: 'Environment
+# variables').  Blank values are treated as unset (see _env_or_none).
+SERVER_ENV_VAR = "TTS_SPEAK_SERVER"
+PERSONA_DIR_ENV_VAR = "TTS_SPEAK_PERSONA_DIR"
+
 _PERSONA_AUDIO_NAME = "ref.wav"
 _PERSONA_TRANSCRIPT_NAME = "ref.txt"
 
@@ -118,6 +127,18 @@ def positive_timeout(value: str) -> int:
 def join_url(base: str, path: str) -> str:
     """Join a server base URL and a path, normalizing duplicate slashes."""
     return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _env_or_none(name: str) -> str | None:
+    """Read a config env var, treating empty/blank values as unset.
+
+    The spec requires a blank TTS_SPEAK_SERVER to fall through to the exit-2
+    usage error, not to masquerade as a configured value and die later as a
+    baffling 'Failed to connect to server'.  Stripping also absorbs the
+    accidental-trailing-space case that shell exports are famous for.
+    """
+    value = os.environ.get(name, "").strip()
+    return value or None
 
 
 def load_audio_base64(path: str) -> str:
@@ -177,6 +198,26 @@ def resolve_reference_sources(
 def _require_readable_file(path: str, label: str) -> None:
     if not os.path.isfile(path) or not os.access(path, os.R_OK):
         raise SpeakError(f"{label} not found or not readable: {path}")
+
+
+def resolve_persona_dir(
+    explicit_persona_dir: str | None, ref_audio: str | None, env_persona_dir: str | None
+) -> str | None:
+    """Resolve the effective persona directory (spec: 'Specifying persona directory').
+
+    Precedence: explicit --persona-dir, then --ref-audio, then the env var.
+    The env var is only a *fallback* for the "no reference source at all"
+    case — it must never steal a reference the user pointed elsewhere, which
+    is why --ref-audio short-circuits it (silently, per the spec).
+    ``explicit_persona_dir`` is None when the flag was not given; a plain
+    argparse default could not make that distinction, which is why the flag
+    uses SUPPRESS instead.
+    """
+    if explicit_persona_dir is not None:
+        return explicit_persona_dir
+    if ref_audio:
+        return None
+    return env_persona_dir
 
 
 def check_schema_version(capabilities: dict) -> None:
@@ -259,6 +300,10 @@ def post_json(url: str, payload: dict, timeout: int) -> object:
 
 def build_base_parser() -> argparse.ArgumentParser:
     """Stage-1 parser: only the arguments known in advance (spec: 'Proposed new usage')."""
+    # Read the env fallbacks once, at construction time, so the defaults and
+    # the "(currently: ...)" help annotations can never disagree.
+    server_env = _env_or_none(SERVER_ENV_VAR)
+    persona_env = _env_or_none(PERSONA_DIR_ENV_VAR)
     parser = argparse.ArgumentParser(
         prog="speak.py",
         description=(
@@ -284,12 +329,20 @@ def build_base_parser() -> argparse.ArgumentParser:
         default=None,
         help="Text string to synthesize (not needed with --list-server-params)",
     )
+    # required=False on purpose: the value may come from TTS_SPEAK_SERVER.
+    # main() turns "neither source" into an argparse-style usage error
+    # (exit 2) before any network traffic.
     parser.add_argument(
         "--server",
-        required=True,
+        required=False,
+        default=server_env,
         metavar="URL",
-        help="Server base URL, e.g. http://10.0.0.5:8000. "
-        "The synthesis endpoint is discovered via /capabilities.",
+        help=(
+            f"Server address. Required unless {SERVER_ENV_VAR} env var is set "
+            f"(currently: {server_env or 'not set'}). "
+            "Command-line value takes precedence. Note: supply base URL only. "
+            "The endpoint is discovered from /capabilities."
+        ),
     )
     parser.add_argument(
         "--ref-audio",
@@ -305,12 +358,19 @@ def build_base_parser() -> argparse.ArgumentParser:
         help="Path to a text file with the reference audio transcript. "
         "Ignored (with a warning) by engines that do not accept reference_text.",
     )
+    # SUPPRESS (not None): main() must tell an explicit --persona-dir apart
+    # from the TTS_SPEAK_PERSONA_DIR fallback, and a plain default erases
+    # that distinction after parsing.
     parser.add_argument(
         "--persona-dir",
-        default=None,
+        default=argparse.SUPPRESS,
         metavar="DIR",
-        help="Directory containing ref.wav and ref.txt; "
-        "supersedes --ref-audio and --ref-audio-transcript.",
+        help=(
+            "Directory containing ref.wav and ref.txt; "
+            "supersedes --ref-audio and --ref-audio-transcript. "
+            f"When omitted, falls back to the {PERSONA_DIR_ENV_VAR} env var "
+            f"(currently: {persona_env or 'not set'})."
+        ),
     )
     parser.add_argument(
         "--output-file",
@@ -600,12 +660,15 @@ def _fail(message: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Run the tool; return the process exit code (0 ok, 1 error; argparse exits 2)."""
     # Stage 1: parse only the arguments known in advance.  Unknown tokens pass
-    # through unvalidated; argparse itself still exits 2 for missing --server
-    # or -h.  The text positional and the reference flags are checked below,
-    # after --list-server-params has had a chance to short-circuit, because
-    # the listing needs neither.
+    # through unvalidated; argparse itself still exits 2 for -h.  The server
+    # (flag or TTS_SPEAK_SERVER) must be resolved here — before even the
+    # --list-server-params short-circuit, which needs the URL — and per the
+    # spec's 'Error precedence' a missing server is reported before any other
+    # usage error.
     parser = build_base_parser()
     args, _unknown = parser.parse_known_args(argv)
+    if args.server is None:
+        parser.error("the following arguments are required: --server")
 
     # Discovery only: no text, no reference audio, no synthesis.
     if args.list_server_params:
@@ -621,8 +684,16 @@ def main(argv: list[str] | None = None) -> int:
     # server errors.
     if args.text is None:
         return _fail("You must supply the text to synthesize!")
-    if not args.ref_audio and not args.persona_dir:
-        return _fail("You must supply reference audio or a persona directory!")
+    # TTS_SPEAK_PERSONA_DIR only applies when --persona-dir was not explicitly
+    # given (argparse.SUPPRESS makes that detectable); the spec then uses it
+    # "as though it had been given to --persona-dir".
+    persona_dir = resolve_persona_dir(
+        getattr(args, "persona_dir", None), args.ref_audio, _env_or_none(PERSONA_DIR_ENV_VAR)
+    )
+    # Exit 2 per spec; routed through argparse so the stderr framing
+    # ("speak.py: error: ...") matches the other usage errors.
+    if not args.ref_audio and not persona_dir:
+        parser.error("You must supply reference audio or a persona directory!")
 
     try:
         capabilities = fetch_capabilities(args.server, args.timeout)
@@ -640,8 +711,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        # persona_dir is the *resolved* value (flag, or env-var fallback), not
+        # the raw stage-2 attribute, which is absent unless the flag was given.
         audio_path, transcript_path = resolve_reference_sources(
-            args.ref_audio, args.ref_audio_transcript, args.persona_dir
+            args.ref_audio, args.ref_audio_transcript, persona_dir
         )
         accepts_reference_text = any(
             p.get("name") == "reference_text" for p in _parameter_specs(capabilities)
