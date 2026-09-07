@@ -23,7 +23,7 @@ Configuration (environment variables):
     OMNIVOICE_HOST       Bind host for `python server_omnivoice.py`.
                          Default: 0.0.0.0
     OMNIVOICE_PORT       Bind port for `python server_omnivoice.py`.
-                         Default: 8000
+                         Default: 7500
 
 Extra dependencies beyond the omnivoice package:
     pip install fastapi uvicorn loguru soundfile
@@ -31,7 +31,7 @@ Extra dependencies beyond the omnivoice package:
 
 Usage:
     python server_omnivoice.py
-    # or: uvicorn server_omnivoice:app --host 0.0.0.0 --port 8000
+    # or: uvicorn server_omnivoice:app --host 0.0.0.0 --port 7500
 """
 
 from __future__ import annotations
@@ -561,7 +561,7 @@ if __name__ == "__main__":
     import uvicorn
 
     host = os.getenv("OMNIVOICE_HOST", "0.0.0.0")
-    port = int(os.getenv("OMNIVOICE_PORT", "8000"))
+    port = int(os.getenv("OMNIVOICE_PORT", "7500"))
     logger.info("Starting OmniVoice REST API server on %s:%d", host, port)
     # Pass the app object directly instead of a module path string,
     # so this works regardless of how the file is invoked.

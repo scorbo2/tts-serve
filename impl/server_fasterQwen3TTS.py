@@ -42,7 +42,7 @@ Configuration (environment variables):
     FASTER_QWEN3TTS_HOST      Bind host for `python server_fasterQwen3TTS.py`.
                               Default: 0.0.0.0
     FASTER_QWEN3TTS_PORT      Bind port for `python server_fasterQwen3TTS.py`.
-                              Default: 8000
+                              Default: 7500
 
 Extra dependencies beyond the faster-qwen3-tts package:
     pip install fastapi uvicorn loguru soundfile
@@ -50,7 +50,7 @@ Extra dependencies beyond the faster-qwen3-tts package:
 
 Usage:
     python server_fasterQwen3TTS.py
-    # or: uvicorn server_fasterQwen3TTS:app --host 0.0.0.0 --port 8000
+    # or: uvicorn server_fasterQwen3TTS:app --host 0.0.0.0 --port 7500
 """
 
 from __future__ import annotations
@@ -630,7 +630,7 @@ if __name__ == "__main__":
     import uvicorn
 
     host = os.getenv("FASTER_QWEN3TTS_HOST", "0.0.0.0")
-    port = int(os.getenv("FASTER_QWEN3TTS_PORT", "8000"))
+    port = int(os.getenv("FASTER_QWEN3TTS_PORT", "7500"))
     logger.info("Starting faster-qwen3-tts REST API server on %s:%d", host, port)
     # Pass the app object directly instead of a module path string,
     # so this works regardless of how the file is invoked.

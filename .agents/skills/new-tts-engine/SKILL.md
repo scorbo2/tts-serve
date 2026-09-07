@@ -69,7 +69,7 @@ Follow the section layout of `server_chatterbox.py` exactly:
     demands a file path. UUID-named files get per-request cleanup, but if the engine caches
     by file path (faster-qwen3-tts pattern), name the file by content hash and *keep* it —
     deleting a shared name races with concurrent requests. `_numpy_to_wav_bytes`.
-14. **`__main__`** — `uvicorn.run(app, host=<NAME>_HOST (default 0.0.0.0), port=<NAME>_PORT (default 8000))`.
+14. **`__main__`** — `uvicorn.run(app, host=<NAME>_HOST (default 0.0.0.0), port=<NAME>_PORT (default 7500))`.
 
 Env var prefix convention: engine name in caps with underscores (`QWEN3TTS_DEVICE`,
 `DOTS_TTS_MODEL`), plus `*_HOST` / `*_PORT`.
