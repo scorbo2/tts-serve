@@ -21,7 +21,7 @@ One FastAPI server per TTS engine. Each server:
 | `server_dotsTTS.py` | dots.tts | 48 kHz | — (the runtime auto-selects CUDA/CPU) | `DOTS_TTS_MODEL` (default `rednote-hilab/dots.tts-soar`) |
 
 All servers also take `*_HOST` (default `0.0.0.0`) and `*_PORT`
-(default `8000`).
+(default `7500`).
 
 ## Running
 

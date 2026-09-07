@@ -70,10 +70,10 @@ Then use the supplied `speak.py` tool to talk to it:
 
 ```bash
 # What parameters does this server accept?
-python tools/speak.py --server http://localhost:8000 --list-server-params
+python tools/speak.py --server http://localhost:7500 --list-server-params
 
 # Synthesize from reference audio + transcript:
-python tools/speak.py --server http://localhost:8000 \
+python tools/speak.py --server http://localhost:7500 \
   --ref-audio /path/to/reference.wav \
   --ref-audio-transcript /path/to/transcript.txt
 ```
@@ -81,7 +81,7 @@ python tools/speak.py --server http://localhost:8000 \
 You can also use `curl` to quickly verify server health:
 
 ```
-curl http://localhost:8000/health
+curl http://localhost:7500/health
 ```
 
 Every server has:
@@ -148,8 +148,8 @@ In addition to a full suite of unit tests, manual testing is possible via
 REST calls using `curl` or some Postman-like tool against a running `tts-serve` instance:
 
 ```
-curl http://localhost:8000/health # shows basic server information including server type
-curl http://localhost:8000/capabilities # full capabilities list in Json format
+curl http://localhost:7500/health # shows basic server information including server type
+curl http://localhost:7500/capabilities # full capabilities list in Json format
 ```
 
 Actual speech generation is better handled via the `speak.py` script,
@@ -157,7 +157,7 @@ available in the `tools` directory:
 
 ```
 python3 speak.py -h # show general help
-python3 speak-py --server http://localhost:8000 --list-server-params # inspect capabilities
+python3 speak.py --server http://localhost:7500 --list-server-params # inspect capabilities
 ```
 
 ## Documentation

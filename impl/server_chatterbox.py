@@ -27,7 +27,7 @@ Configuration (environment variables):
     CHATTERBOX_HOST      Bind host for `python server_chatterbox.py`.
                          Default: 0.0.0.0
     CHATTERBOX_PORT      Bind port for `python server_chatterbox.py`.
-                         Default: 8000
+                         Default: 7500
 
 Extra dependencies beyond the chatterbox-tts package:
     pip install fastapi uvicorn loguru soundfile
@@ -35,7 +35,7 @@ Extra dependencies beyond the chatterbox-tts package:
 
 Usage:
     python server_chatterbox.py
-    # or: uvicorn server_chatterbox:app --host 0.0.0.0 --port 8000
+    # or: uvicorn server_chatterbox:app --host 0.0.0.0 --port 7500
 """
 
 from __future__ import annotations
@@ -589,7 +589,7 @@ if __name__ == "__main__":
     import uvicorn
 
     host = os.getenv("CHATTERBOX_HOST", "0.0.0.0")
-    port = int(os.getenv("CHATTERBOX_PORT", "8000"))
+    port = int(os.getenv("CHATTERBOX_PORT", "7500"))
     logger.info("Starting Chatterbox REST API server on %s:%d", host, port)
     # Pass the app object directly instead of a module path string,
     # so this works regardless of how the file is invoked.

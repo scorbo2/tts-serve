@@ -397,13 +397,13 @@ M1–M3 can proceed in parallel per engine once M1 lands; M4 only needs M2 to st
 
 ```bash
 # 1. Discovery
-curl -s localhost:8000/capabilities | jq .
+curl -s localhost:7500/capabilities | jq .
 #    - schema_version == 1
 #    - parameters[] names match what the UI renders
 #    - reference_audio.languages/etc. correct for this engine
 
 # 2. Strictness
-curl -s -X POST localhost:8000/synthesize -H 'Content-Type: application/json' \
+curl -s -X POST localhost:7500/synthesize -H 'Content-Type: application/json' \
   -d '{"text":"hi","audio_base64":"...","exaggeration":0.9}'   # on a non-chatterbox engine
 #    - expect 422 naming "exaggeration"
 

@@ -60,7 +60,7 @@ Examples:
   speak.py "Bonjour le monde" --language fr --steps 20 --output-file greeting.wav
 
   # Override reference files and server
-  speak.py "Test" --ref-audio my_voice.wav --ref-audio-transcript my_voice.txt --server http://localhost:8000/tts
+  speak.py "Test" --ref-audio my_voice.wav --ref-audio-transcript my_voice.txt --server http://localhost:7500/tts
 ```
 
 ### Proposed new usage
@@ -69,8 +69,8 @@ Use `argparse` for command-line argument handling.
 
 The new script's only known-in-advance parameters (`parse_known_args()`):
 
-- `--server`: (optional, but see Environment Variables section) The server URL (example: `http://10.0.0.5:8000`)
-  **Note**: the old script required the full URL, with endpoint (example: `http://10.0.0.5:8000/synthesize`).
+- `--server`: (optional, but see Environment Variables section) The server URL (example: `http://10.0.0.5:7500`)
+  **Note**: the old script required the full URL, with endpoint (example: `http://10.0.0.5:7500/synthesize`).
   This new script requires just the server name/IP and port. The endpoint is discovered from `/capabilities`.
 - `text` (required positional argument): any text to be synthesized.
   Not needed when `--list-server-params` is given (the listing performs no synthesis).

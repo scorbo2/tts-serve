@@ -9,10 +9,10 @@ decision D4 (docs/01-server-generification.md): the server's request model is
 the single source of truth, so the CLI can never drift from it.
 
 Usage:
-    python tools/speak.py "Hello, world" --server http://10.0.0.5:8000 --ref-audio my_voice.wav
-    python tools/speak.py "Bonjour le monde" --server http://10.0.0.5:8000 \
+    python tools/speak.py "Hello, world" --server http://10.0.0.5:7500 --ref-audio my_voice.wav
+    python tools/speak.py "Bonjour le monde" --server http://10.0.0.5:7500 \
         --persona-dir ./alice --language fr --output-file greeting.wav
-    python tools/speak.py --server http://10.0.0.5:8000 --list-server-params
+    python tools/speak.py --server http://10.0.0.5:7500 --list-server-params
 
 `--server` and `--persona-dir` may also come from the TTS_SPEAK_SERVER and
 TTS_SPEAK_PERSONA_DIR environment variables; an explicit flag always wins,
@@ -329,11 +329,11 @@ def build_base_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  %(prog)s \"Hello, world\" --server http://10.0.0.5:8000 --ref-audio my_voice.wav\n"
-            "  %(prog)s \"Bonjour le monde\" --server http://10.0.0.5:8000 "
+            "  %(prog)s \"Hello, world\" --server http://10.0.0.5:7500 --ref-audio my_voice.wav\n"
+            "  %(prog)s \"Bonjour le monde\" --server http://10.0.0.5:7500 "
             "--persona-dir ./alice --language fr\n"
-            "  %(prog)s \"Test\" --server http://10.0.0.5:8000 --ref-audio v.wav --output-file out.wav\n"
-            "  %(prog)s --server http://10.0.0.5:8000 --list-server-params\n"
+            "  %(prog)s \"Test\" --server http://10.0.0.5:7500 --ref-audio v.wav --output-file out.wav\n"
+            "  %(prog)s --server http://10.0.0.5:7500 --list-server-params\n"
         ),
     )
     # Optional at the argparse level on purpose: --list-server-params needs
