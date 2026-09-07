@@ -1,0 +1,274 @@
+"""Tests for ``server_fasterQwen3TTS.py``.
+
+Covers the model-free HTTP surface: /capabilities (snapshot), /health, the
+landing page, request-body validation (422s), and the reference-audio
+pre-flight checks (400s) — plus the content-addressed staging helper
+directly, since it is a plain function with no model dependency.  Real
+synthesis needs the model + GPU and is out of scope here.
+"""
+
+import types
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import server_fasterQwen3TTS as srv
+from helpers import b64, load_snapshot, make_wav_bytes
+
+
+@pytest.fixture(scope="module")
+def client():
+    # Deliberately NOT a context manager: entering it would run the FastAPI
+    # lifespan, which loads the (stubbed) model.  Not needed for these tests.
+    return TestClient(srv.app)
+
+
+# ---------------------------------------------------------------------------
+# GET /capabilities
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_matches_snapshot(client):
+    response = client.get("/capabilities")
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc == load_snapshot("faster_qwen3_capabilities.json")
+
+
+def test_capabilities_language_enum_is_codes_plus_auto(client):
+    doc = client.get("/capabilities").json()
+    by_name = {p["name"]: p for p in doc["parameters"]}
+    enum = by_name["language"]["enum"]
+    # The API contract is two-letter codes (docs/02) plus the engine's
+    # 'auto' auto-detection sentinel; the engine-internal names must not
+    # leak into the document.
+    assert "auto" in enum
+    assert "en" in enum
+    assert "zh" in enum
+    assert "english" not in enum
+    assert doc["languages"] == sorted(srv.LANGUAGE_CODES)
+
+
+def test_capabilities_required_fields(client):
+    doc = client.get("/capabilities").json()
+    by_name = {p["name"]: p for p in doc["parameters"]}
+    assert by_name["text"]["required"] is True
+    assert by_name["audio_base64"]["required"] is True
+    # ICL (advanced) mode conditions on the transcript as well as the
+    # audio, so it is a hard requirement, not an optional refinement.
+    assert by_name["reference_text"]["required"] is True
+    assert by_name["language"]["required"] is False
+    assert by_name["seed"]["required"] is False
+
+
+# ---------------------------------------------------------------------------
+# GET /health and the landing page
+# ---------------------------------------------------------------------------
+
+
+def test_health(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["serverType"] == "faster-qwen3-tts"
+    assert body["device"] == srv.DEVICE
+    assert body["model"] == srv.MODEL_NAME_OR_PATH
+
+
+def test_root_landing_page(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Faster Qwen3-TTS" in response.text
+    assert "/synthesize" in response.text
+
+
+# ---------------------------------------------------------------------------
+# POST /synthesize — request-body validation (422)
+# ---------------------------------------------------------------------------
+
+
+def _post(client, payload):
+    return client.post("/synthesize", json=payload)
+
+
+def _valid_payload():
+    return {
+        "text": "Hello there",
+        "audio_base64": b64(make_wav_bytes(3.0)),
+        "reference_text": "A short, exact transcript of the reference clip.",
+    }
+
+
+def test_synthesize_unknown_field_rejected(client):
+    payload = _valid_payload()
+    payload["bogus_field"] = 1
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_missing_required_fields_rejected(client):
+    assert _post(client, {}).status_code == 422
+
+
+def test_synthesize_missing_reference_text_rejected(client):
+    # Advanced (ICL) mode only: without a transcript the request is invalid
+    # at the boundary, not a 400 or a fallback to x-vector mode.
+    payload = _valid_payload()
+    del payload["reference_text"]
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_empty_text_rejected(client):
+    payload = _valid_payload()
+    payload["text"] = ""
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_whitespace_text_rejected(client):
+    payload = _valid_payload()
+    payload["text"] = "   "
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_empty_audio_rejected(client):
+    payload = _valid_payload()
+    payload["audio_base64"] = ""
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_empty_reference_text_rejected(client):
+    payload = _valid_payload()
+    payload["reference_text"] = ""
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_whitespace_reference_text_rejected(client):
+    payload = _valid_payload()
+    payload["reference_text"] = "   "
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_unsupported_language_rejected(client):
+    # A valid code that the Base checkpoint does not support.
+    payload = _valid_payload()
+    payload["language"] = "xx"
+    assert _post(client, payload).status_code == 422
+
+
+# The shared docs/02 language contract (case, names, garbage, non-strings,
+# null/empty -> 'en') is asserted once for every server in
+# test_language_contract.py; keep only engine-specific language tests here.
+
+
+def test_synthesize_temperature_above_range_rejected(client):
+    payload = _valid_payload()
+    payload["temperature"] = 3.0
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_top_p_above_range_rejected(client):
+    payload = _valid_payload()
+    payload["top_p"] = 1.5
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_repetition_penalty_below_range_rejected(client):
+    payload = _valid_payload()
+    payload["repetition_penalty"] = 0.5
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_seed_out_of_range_rejected(client):
+    payload = _valid_payload()
+    payload["seed"] = 0
+    assert _post(client, payload).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /synthesize — reference-audio pre-flight (400)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_runtime(monkeypatch):
+    monkeypatch.setattr(
+        srv,
+        "_runtime",
+        types.SimpleNamespace(sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE),
+    )
+
+
+def test_synthesize_undecodable_audio_rejected(client, fake_runtime):
+    payload = _valid_payload()
+    payload["audio_base64"] = b64(b"this is definitely not audio")
+    response = _post(client, payload)
+    assert response.status_code == 400
+    assert "decode" in response.json()["detail"].lower()
+
+
+def test_synthesize_too_short_audio_rejected(client, fake_runtime):
+    payload = _valid_payload()
+    payload["audio_base64"] = b64(make_wav_bytes(0.5))  # 0.5 s < 2.0 s minimum
+    response = _post(client, payload)
+    assert response.status_code == 400
+    assert "2" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# _write_temp_audio — content-addressed staging
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def staging_dir(tmp_path, monkeypatch):
+    """Point the server's staging directory at a per-test tmp dir."""
+    directory = tmp_path / "staging"
+    directory.mkdir()
+    monkeypatch.setattr(srv, "_TEMP_AUDIO_DIR", directory)
+    return directory
+
+
+def test_write_temp_audio_withSameContentTwice_returnsSamePath_andSkipsRewrite(staging_dir):
+    audio = make_wav_bytes(3.0)
+
+    # GIVEN the clip is staged once:
+    first_path = srv._write_temp_audio(audio)
+    mtime_before = Path(first_path).stat().st_mtime_ns
+
+    # WHEN we stage the identical clip again,
+    # THEN the path is reused and the file is not rewritten
+    # (a rewrite would bump mtime_ns and re-encode the same bytes for nothing):
+    second_path = srv._write_temp_audio(audio)
+
+    assert second_path == first_path
+    assert Path(first_path).stat().st_mtime_ns == mtime_before
+    assert Path(first_path).read_bytes() == audio
+
+
+def test_write_temp_audio_withDifferentContent_returnsDistinctPaths(staging_dir):
+    # GIVEN two distinct clips (same duration, different frequency):
+    clip_a = make_wav_bytes(3.0, freq=440.0)
+    clip_b = make_wav_bytes(3.0, freq=880.0)
+
+    # WHEN we stage each,
+    # THEN the content hashes differ, so do the paths and contents:
+    path_a = srv._write_temp_audio(clip_a)
+    path_b = srv._write_temp_audio(clip_b)
+
+    assert path_a != path_b
+    assert Path(path_a).read_bytes() == clip_a
+    assert Path(path_b).read_bytes() == clip_b
+    assert len(list(staging_dir.iterdir())) == 2
+
+
+def test_write_temp_audio_leavesNoStagingFilesBehind(staging_dir):
+    # GIVEN a freshly staged clip:
+    path = srv._write_temp_audio(make_wav_bytes(3.0))
+
+    # THEN only the content-hashed file remains in the directory
+    # (the atomic-rename staging file must not leak):
+    remaining = sorted(p.name for p in staging_dir.iterdir())
+
+    assert remaining == [Path(path).name]
+    assert not any(name.endswith(".tmp") for name in remaining)

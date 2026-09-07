@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 import server_chatterbox
 import server_dotsTTS
+import server_fasterQwen3TTS
 import server_omnivoice
 import server_qwen3TTS
 from helpers import b64, make_wav_bytes
@@ -27,9 +28,10 @@ SERVERS = [
     (server_chatterbox, False),
     (server_omnivoice, False),
     (server_qwen3TTS, True),
+    (server_fasterQwen3TTS, True),
     (server_dotsTTS, True),
 ]
-SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "dots-tts"]
+SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "faster-qwen3-tts", "dots-tts"]
 
 
 @pytest.fixture(params=SERVERS, ids=SERVER_IDS)
@@ -57,15 +59,20 @@ def fake_runtime(server_contract, monkeypatch):
     )
 
 
-def _payload():
+def _payload(module):
     # The two fields every server requires.  A real 3 s clip so the payload
     # is valid even for tests where the handler is expected to run (400
     # audio pre-flight); undecodable audio is swapped in where needed.
-    return {"text": "Hello there", "audio_base64": b64(make_wav_bytes(3.0))}
+    payload = {"text": "Hello there", "audio_base64": b64(make_wav_bytes(3.0))}
+    # faster-qwen3-tts exposes ICL (advanced) mode only, so its reference
+    # transcript is a hard requirement rather than an optional refinement.
+    if module is server_fasterQwen3TTS:
+        payload["reference_text"] = "A short, exact transcript of the reference clip."
+    return payload
 
 
-def _undecodable_audio_payload():
-    payload = _payload()
+def _undecodable_audio_payload(module):
+    payload = _payload(module)
     payload["audio_base64"] = b64(b"this is definitely not audio")
     return payload
 
@@ -77,14 +84,14 @@ def _undecodable_audio_payload():
 
 def test_model_omittedLanguage_defaultsToEnglish(server_contract):
     module, _ = server_contract
-    request = module.SynthesisRequest(**_payload())
+    request = module.SynthesisRequest(**_payload(module))
     assert request.language == "en"
 
 
 @pytest.mark.parametrize("raw_language", [None, "", "   "])
 def test_model_emptyLanguage_normalizesToEnglish(server_contract, raw_language):
     module, _ = server_contract
-    request = module.SynthesisRequest(**_payload(), language=raw_language)
+    request = module.SynthesisRequest(**_payload(module), language=raw_language)
     assert request.language == "en"
 
 
@@ -107,7 +114,7 @@ def test_model_emptyLanguage_normalizesToEnglish(server_contract, raw_language):
 )
 def test_synthesize_language_nonConforming_rejected(server_contract, client, raw_language):
     module, _ = server_contract
-    payload = _payload()
+    payload = _payload(module)
     payload["language"] = raw_language
     response = client.post("/synthesize", json=payload)
     assert response.status_code == 422
@@ -126,14 +133,15 @@ def test_synthesize_language_validCode_passesValidation(server_contract, client,
     # A conforming code must clear request validation; with undecodable
     # audio the handler then fails its 400 audio pre-flight — proving we
     # got past validation (actual synthesis needs a real model + GPU).
-    payload = _undecodable_audio_payload()
+    module, _ = server_contract
+    payload = _undecodable_audio_payload(module)
     payload["language"] = code
     assert client.post("/synthesize", json=payload).status_code == 400
 
 
 def test_synthesize_language_autoSentinel_matchesDeclaration(server_contract, client, fake_runtime):
     module, auto_allowed = server_contract
-    payload = _undecodable_audio_payload()
+    payload = _undecodable_audio_payload(module)
     payload["language"] = "auto"
     response = client.post("/synthesize", json=payload)
     if auto_allowed:
