@@ -14,7 +14,7 @@
 ## Layout
 
 - `tts-engine-common/` — shared FastAPI + Pydantic package. Design constraint: **no torch, no engine deps** — it must stay importable and testable on any box (see `pyproject.toml` comment and `docs/01-server-generification.md` D7).
-- `impl/` — four standalone FastAPI server scripts, one per engine: `server_chatterbox.py`, `server_omnivoice.py`, `server_qwen3TTS.py`, `server_dotsTTS.py`. Run via `python impl/server_<name>.py` or uvicorn; env config is documented in each module's docstring.
+- `impl/` — five standalone FastAPI server scripts, one per engine: `server_chatterbox.py`, `server_omnivoice.py`, `server_qwen3TTS.py`, `server_fasterQwen3TTS.py`, `server_dotsTTS.py`. Run via `python impl/server_<name>.py` or uvicorn; env config is documented in each module's docstring.
 - `impl/tests/` — GPU-free test suite + committed `/capabilities` snapshots (`snapshots/`).
 - `tools/` — `speak.py`, a command-line testing tool for any engine server: stdlib-only (no torch, no engine deps, no need to install `tts-engine-common`), discovers engine parameters from `GET /capabilities`. GPU-free tests in `tools/tests/` (network and aplay stubbed). Spec: `docs/03-speak-script.md`.
 - `docs/` — design docs; `01-server-generification.md` contains the binding decisions (D1–D7).
@@ -26,7 +26,7 @@
 - Servers read env config at **import time** (module-level `os.getenv`). Tests pin env in `impl/tests/_bootstrap.py` *before* any server import — that file is shared by `conftest.py` and `update_snapshots.py`, so keep the pinned values in sync with the servers' documented defaults.
 - Core request vocabulary: `text`, `audio_base64`, `reference_text`, `language`, `seed` (`CORE_FIELDS`). Core response: `audio_base64`, `sample_rate`, `seed`, `time_used`, `rtf` plus per-server extras (e.g. `fid`). `language` is *not* guaranteed core — check `/capabilities`.
 - The `language` contract (docs/02-language-handling.md): **two-letter lowercase codes** only; null/empty normalizes to `en` at the request boundary (shared helpers in `tts_engine_common.language` — reuse them, don't re-implement). Engines with a different internal format (Qwen3-TTS lowercase names, dots.tts uppercase codes) map codes at their own server; auto-detection is exposed as the special value `auto`. This is why `schema_version` is 2 — don't "fix" servers back to accepting names/free-form.
-- dots.tts outputs **48 kHz** (the other three are 24 kHz) and auto-selects CUDA/CPU (no device env var). Its snapshot's `device` field is machine-dependent; the test deliberately compares everything *except* `device`. Don't "fix" a device mismatch.
+- dots.tts outputs **48 kHz** (the other four are 24 kHz) and auto-selects CUDA/CPU (no device env var). Its snapshot's `device` field is machine-dependent; the test deliberately compares everything *except* `device`. Don't "fix" a device mismatch.
 
 ## Test gotchas
 
@@ -41,6 +41,7 @@
 - **Chatterbox** — no `reference_text` field (deliberate; it conditions on audio only). Only the first 10 s of the reference are used. Output is PerTh-watermarked by the library.
 - **OmniVoice** — omitting `reference_text` triggers on-the-fly Whisper transcription; the first such request pays the ASR model load. References over 20 s are trimmed at the largest silence gap.
 - **Qwen3-TTS** — `language` takes two-letter codes (`en`, `zh`) or `auto`; the server maps codes to the engine's lowercase *names* internally (`en` → `english`). Omitting `reference_text` transparently enables speaker-embedding-only mode.
+- **faster-qwen3-tts** — CUDA-only fork of Qwen3-TTS (`FASTER_QWEN3TTS_DEVICE` must start with `cuda`; the engine has no CPU/MPS backend). ICL (advanced) mode only: `reference_text` is **required** (422 without it — do not add a speaker-embedding fallback). `language` takes two-letter codes or `auto`; the server maps codes to the engine's lowercase *names*. The engine caches the encoded voice prompt per (file path, transcript), so the temp prompt file is content-hashed (SHA-256) rather than UUID-named. Synthesis is serialized with a lock: the engine replays captured CUDA graphs (static buffers, not re-entrant) and keeps a shared prompt cache.
 - **dots.tts** — the runtime demands a file path for prompt audio, so the server writes a temp file; reference transcript is optional. `language` takes two-letter codes or `auto`; the server maps them to the engine's uppercase codes / `auto_detect` internally.
 
 ## Adding a new engine

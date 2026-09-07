@@ -39,4 +39,6 @@ def setup() -> None:
     os.environ.pop("OMNIVOICE_MODEL", None)      # default: k2-fsa/OmniVoice
     os.environ["QWEN3TTS_DEVICE"] = "cuda"
     os.environ.pop("QWEN3TTS_MODEL", None)       # default: Qwen/Qwen3-TTS-12Hz-1.7B-Base
+    os.environ["FASTER_QWEN3TTS_DEVICE"] = "cuda"
+    os.environ.pop("FASTER_QWEN3TTS_MODEL", None)  # default: Qwen/Qwen3-TTS-12Hz-1.7B-Base
     os.environ.pop("DOTS_TTS_MODEL", None)       # default: rednote-hilab/dots.tts-soar

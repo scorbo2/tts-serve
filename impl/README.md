@@ -2,9 +2,11 @@
 
 One FastAPI server per TTS engine. Each server:
 
-- loads its model once on startup (HuggingFace download on first run),
-- exposes `GET /` (landing page), `GET /health`, `GET /capabilities`, and
-  `POST /synthesize`,
+- loads its model once on startup (HuggingFace download on first run,
+  can be explicitly pointed at a locally-downloaded model via env vars
+  to run 100% offline),
+- exposes `GET /` (landing page), `GET /health`, `GET /capabilities`,
+  `GET /docs`, and `POST /synthesize`,
 - validates requests with a Pydantic model and derives `/capabilities` from
   that same model via [`tts-engine-common`](../tts-engine-common/README.md),
 - rejects unknown fields (`422`) and bad reference audio (`400`) before
@@ -15,6 +17,7 @@ One FastAPI server per TTS engine. Each server:
 | `server_chatterbox.py` | Chatterbox multilingual | 24 kHz | `CHATTERBOX_DEVICE` (cuda/mps/cpu, default cuda) | `CHATTERBOX_T3_MODEL` (v2/v3 or a `.safetensors` name, default v3) |
 | `server_omnivoice.py` | OmniVoice | 24 kHz | `OMNIVOICE_DEVICE` (default cuda) | `OMNIVOICE_MODEL` (HF id or path, default `k2-fsa/OmniVoice`) |
 | `server_qwen3TTS.py` | Qwen3-TTS Base | 24 kHz | `QWEN3TTS_DEVICE` (default cuda) | `QWEN3TTS_MODEL` (default `Qwen/Qwen3-TTS-12Hz-1.7B-Base`) |
+| `server_fasterQwen3TTS.py` | faster-qwen3-tts (CUDA-graphs Qwen3-TTS fork) | 24 kHz | `FASTER_QWEN3TTS_DEVICE` (must be `cuda` or `cuda:N` — no CPU/MPS backend; default cuda) | `FASTER_QWEN3TTS_MODEL` (default `Qwen/Qwen3-TTS-12Hz-1.7B-Base`) |
 | `server_dotsTTS.py` | dots.tts | 48 kHz | — (the runtime auto-selects CUDA/CPU) | `DOTS_TTS_MODEL` (default `rednote-hilab/dots.tts-soar`) |
 
 All servers also take `*_HOST` (default `0.0.0.0`) and `*_PORT`
@@ -24,11 +27,12 @@ All servers also take `*_HOST` (default `0.0.0.0`) and `*_PORT`
 
 ```bash
 pip install <engine-package> fastapi uvicorn loguru soundfile
-pip install ../tts-engine-common     # in-repo copy; or: pip install -e ../tts-engine-common
-python server_chatterbox.py          # or: uvicorn server_chatterbox:app
+pip install ../tts-engine-common   # or: pip install -e ../tts-engine-common
+python server_{server}.py          # or: uvicorn server_{server}:app
 ```
 
-Engine packages: `chatterbox-tts`, `omnivoice`, `qwen-tts`, `dots.tts`.
+Engine packages: `chatterbox-tts`, `omnivoice`, `qwen-tts`, `faster-qwen3-tts`,
+`dots.tts`.
 The full parameter list for each server is at its `GET /capabilities` —
 don't trust this README over that endpoint, the schema is the source of truth.
 
@@ -41,10 +45,11 @@ Per [docs/02-language-handling.md](../docs/02-language-handling.md), the
 format differs map it at their own server — the client never sees it:
 
 - **Qwen3-TTS** maps codes to lowercase names (`en` → `english`);
+- **faster-qwen3-tts** maps codes to lowercase names (`en` → `english`);
 - **dots.tts** maps codes to uppercase (`en` → `EN`).
 
 Engines with auto-detection expose it as the special value `auto`
-(Qwen3-TTS, dots.tts).
+(Qwen3-TTS, faster-qwen3-tts, dots.tts).
 
 ## Engine-specific notes
 
@@ -59,6 +64,11 @@ Engines with auto-detection expose it as the special value `auto`
   internally). Omitting `reference_text` transparently enables
   speaker-embedding-only mode (`x_vector_only_mode`), since the engine's
   in-context mode hard-requires a transcript.
+- **faster-qwen3-tts** — CUDA-only fork of Qwen3-TTS (its CUDA-graph backend
+  rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required). Exposes
+  ICL (advanced) mode only, so `reference_text` is **required** — there is no
+  speaker-embedding fallback. `language` takes two-letter codes or `auto`
+  (mapped to the engine's lowercase names).
 - **dots.tts** — 48 kHz output (unlike the 24 kHz engines). The runtime
   demands a file path for the prompt audio, so the server writes a temp file;
   the reference transcript is optional. `language` takes two-letter codes or
