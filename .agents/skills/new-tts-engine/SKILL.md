@@ -66,7 +66,9 @@ Follow the section layout of `server_chatterbox.py` exactly:
     timed `generate()` under the lock → `compute_rtf` → `_numpy_to_wav_bytes` (clips to [-1, 1]) →
     500 with message on failure.
 13. **Helpers** — `seed_everything`; `_write_temp_audio`/`_cleanup_temp` only if the engine
-    demands a file path; `_numpy_to_wav_bytes`.
+    demands a file path. UUID-named files get per-request cleanup, but if the engine caches
+    by file path (faster-qwen3-tts pattern), name the file by content hash and *keep* it —
+    deleting a shared name races with concurrent requests. `_numpy_to_wav_bytes`.
 14. **`__main__`** — `uvicorn.run(app, host=<NAME>_HOST (default 0.0.0.0), port=<NAME>_PORT (default 8000))`.
 
 Env var prefix convention: engine name in caps with underscores (`QWEN3TTS_DEVICE`,

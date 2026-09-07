@@ -535,9 +535,6 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     except Exception as exc:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        # Clean up the temporary prompt audio file.
-        _cleanup_temp(prompt_audio_path)
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +566,7 @@ def _check_reference_audio(raw_bytes: bytes) -> None:
 
 def _write_temp_audio(raw_bytes: bytes) -> str:
     """
-    Write raw audio bytes to a temporary file.
+    Make the raw audio bytes available at a stable content-addressed path.
 
     The engine's ICL path reads the reference from a file path via
     soundfile.  The filename is the SHA-256 of the audio content rather than
@@ -578,20 +575,36 @@ def _write_temp_audio(raw_bytes: bytes) -> str:
     same reference clip hit that cache instead of re-encoding the audio.
     The .wav extension is cosmetic — the loader sniffs the header, so
     MP3/OGG/FLAC bytes work fine.
+
+    The file is deliberately kept rather than deleted per request: staging
+    happens *before* the synthesis lock is taken, so with a shared
+    content-addressed name a per-request cleanup could delete the file
+    after another request for the same clip has staged it but before that
+    request reaches its turn on the lock.  Disk usage grows only with the
+    number of *unique* clips; wipe the staging directory to reclaim space.
     """
     digest = hashlib.sha256(raw_bytes).hexdigest()
     path = _TEMP_AUDIO_DIR / f"{digest}.wav"
-    path.write_bytes(raw_bytes)
-    logger.debug("Wrote temporary reference audio: {}", path)
-    return str(path)
-
-
-def _cleanup_temp(path: str) -> None:
-    """Remove a temporary audio file if it exists."""
+    if path.exists():
+        # Same clip already staged: reusing it is what makes the engine's
+        # (path, transcript) prompt cache useful, and skipping the write
+        # also keeps a queued request from clobbering a file that the
+        # request holding the synthesis lock is currently reading.
+        logger.debug("Reusing staged reference audio: {}", path)
+        return str(path)
+    # Stage into a unique sibling file and rename into place: os.replace is
+    # atomic, so no reader can ever observe a half-written clip, and a crash
+    # mid-write cannot leave a corrupt file behind the content hash (which
+    # would poison every future request for that clip).
+    staging = path.with_name(f"{digest}.wav.{uuid.uuid4().hex}.tmp")
     try:
-        Path(path).unlink(missing_ok=True)
-    except OSError:
-        pass
+        staging.write_bytes(raw_bytes)
+        os.replace(staging, path)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    logger.debug("Staged reference audio: {}", path)
+    return str(path)
 
 
 def _numpy_to_wav_bytes(audio_array: np.ndarray, sample_rate: int) -> bytes:

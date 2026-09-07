@@ -2,11 +2,13 @@
 
 Covers the model-free HTTP surface: /capabilities (snapshot), /health, the
 landing page, request-body validation (422s), and the reference-audio
-pre-flight checks (400s).  Real synthesis needs the model + GPU and is out
-of scope here.
+pre-flight checks (400s) — plus the content-addressed staging helper
+directly, since it is a plain function with no model dependency.  Real
+synthesis needs the model + GPU and is out of scope here.
 """
 
 import types
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -211,3 +213,62 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "2" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# _write_temp_audio — content-addressed staging
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def staging_dir(tmp_path, monkeypatch):
+    """Point the server's staging directory at a per-test tmp dir."""
+    directory = tmp_path / "staging"
+    directory.mkdir()
+    monkeypatch.setattr(srv, "_TEMP_AUDIO_DIR", directory)
+    return directory
+
+
+def test_write_temp_audio_withSameContentTwice_returnsSamePath_andSkipsRewrite(staging_dir):
+    audio = make_wav_bytes(3.0)
+
+    # GIVEN the clip is staged once:
+    first_path = srv._write_temp_audio(audio)
+    mtime_before = Path(first_path).stat().st_mtime_ns
+
+    # WHEN we stage the identical clip again,
+    # THEN the path is reused and the file is not rewritten
+    # (a rewrite would bump mtime_ns and re-encode the same bytes for nothing):
+    second_path = srv._write_temp_audio(audio)
+
+    assert second_path == first_path
+    assert Path(first_path).stat().st_mtime_ns == mtime_before
+    assert Path(first_path).read_bytes() == audio
+
+
+def test_write_temp_audio_withDifferentContent_returnsDistinctPaths(staging_dir):
+    # GIVEN two distinct clips (same duration, different frequency):
+    clip_a = make_wav_bytes(3.0, freq=440.0)
+    clip_b = make_wav_bytes(3.0, freq=880.0)
+
+    # WHEN we stage each,
+    # THEN the content hashes differ, so do the paths and contents:
+    path_a = srv._write_temp_audio(clip_a)
+    path_b = srv._write_temp_audio(clip_b)
+
+    assert path_a != path_b
+    assert Path(path_a).read_bytes() == clip_a
+    assert Path(path_b).read_bytes() == clip_b
+    assert len(list(staging_dir.iterdir())) == 2
+
+
+def test_write_temp_audio_leavesNoStagingFilesBehind(staging_dir):
+    # GIVEN a freshly staged clip:
+    path = srv._write_temp_audio(make_wav_bytes(3.0))
+
+    # THEN only the content-hashed file remains in the directory
+    # (the atomic-rename staging file must not leak):
+    remaining = sorted(p.name for p in staging_dir.iterdir())
+
+    assert remaining == [Path(path).name]
+    assert not any(name.endswith(".tmp") for name in remaining)
