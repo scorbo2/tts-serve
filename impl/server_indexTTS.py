@@ -459,14 +459,14 @@ app.add_api_route(
 
 
 @dataclass
-class IndexTTTRuntime:
+class IndexTTSRuntime:
     """Holds the loaded model and its metadata for the lifetime of the server."""
 
     model: IndexTTS2
     device: str
 
 
-_runtime: IndexTTTRuntime | None = None
+_runtime: IndexTTSRuntime | None = None
 
 # The model keeps speaker/emotion conditioning caches keyed by prompt file
 # path and is not thread-safe (shared GPT KV state during generation), so
@@ -498,7 +498,7 @@ def _ensure_model_resources() -> None:
         )
 
 
-def _get_runtime() -> IndexTTTRuntime:
+def _get_runtime() -> IndexTTSRuntime:
     """Return the global runtime, loading the model once on first call."""
     global _runtime
     if _runtime is None:
@@ -516,7 +516,7 @@ def _get_runtime() -> IndexTTTRuntime:
             use_qwen_emo=USE_QWEN_EMO,
             **({"device": DEVICE} if DEVICE else {}),
         )
-        _runtime = IndexTTTRuntime(model=model, device=str(model.device))
+        _runtime = IndexTTSRuntime(model=model, device=str(model.device))
         logger.info("Model loaded successfully. Device: %s", _runtime.device)
     return _runtime
 
