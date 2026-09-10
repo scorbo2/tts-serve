@@ -69,7 +69,11 @@ class ParamSpec(BaseModel):
         """
         if self.item_labels is None:
             return self
-        if self.type != "array" or self.min_items != self.max_items:
+        # An unbounded array (both bounds None) is variable size too: without
+        # the explicit None check, None == None would let it through as a
+        # "fixed-size" array of size None, and the length check below would
+        # then compare against None with a nonsense error message.
+        if self.type != "array" or self.min_items is None or self.min_items != self.max_items:
             raise ValueError(
                 f"item_labels for {self.name!r} requires a fixed-size array "
                 "(type 'array' with min_items == max_items)"

@@ -460,6 +460,12 @@ class TestItemLabels:
         with pytest.raises(ValueError, match="requires a fixed-size array"):
             self._fixed_array(max_items=None, item_labels=["a", "b", "c"])
 
+    def test_item_labels_onUnboundedArray_rejected(self) -> None:
+        # GIVEN an array with no item bounds at all (min_items == max_items == None),
+        # which is variable size despite None == None:
+        with pytest.raises(ValueError, match="requires a fixed-size array"):
+            self._fixed_array(min_items=None, max_items=None, item_labels=["a", "b"])
+
     def test_item_labels_wrongLength_rejected(self) -> None:
         # GIVEN a fixed 3-item array with only 2 labels:
         with pytest.raises(ValueError, match="has 2 entries"):
