@@ -300,12 +300,18 @@ def test_synthesize_audio_plus_text_emotion_sources_rejected(client):
 
 
 @pytest.fixture
-def fake_runtime(monkeypatch):
+def fake_runtime(monkeypatch, tmp_path):
     # The 400 pre-flight checks all run before the model is touched, so a
     # bare namespace is enough for _get_runtime() to skip model loading.
     monkeypatch.setattr(
         srv, "_runtime", types.SimpleNamespace(model=None, device="cpu")
     )
+    # Redirect staging off the real system temp dir: stage_audio() keeps its
+    # content-addressed files on disk, so the emotion-audio tests (which
+    # stage the valid 3 s speaker clip before rejecting the emotion clip)
+    # would otherwise leak junk out of the suite.  A per-test scratch dir is
+    # hermetic and gets collected by pytest's tmp retention policy.
+    monkeypatch.setattr(srv, "_TEMP_AUDIO_DIR", tmp_path)
 
 
 def test_synthesize_undecodable_audio_rejected(client, fake_runtime):
