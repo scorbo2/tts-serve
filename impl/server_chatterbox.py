@@ -49,7 +49,6 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -71,9 +70,12 @@ from tts_engine_common import (
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    cleanup_temp,
     compute_rtf,
     decode_base64,
     normalize_language,
+    temp_audio_dir,
+    write_temp_audio,
 )
 
 # ---------------------------------------------------------------------------
@@ -451,7 +453,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     _check_reference_audio(raw_audio)
 
-    prompt_audio_path = _write_temp_audio(raw_audio)
+    prompt_audio_path = write_temp_audio(raw_audio, _TEMP_AUDIO_DIR)
 
     try:
         # Time the actual synthesis call.
@@ -505,15 +507,14 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         # Clean up the temporary reference audio file.
-        _cleanup_temp(prompt_audio_path)
+        cleanup_temp(prompt_audio_path)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TEMP_AUDIO_DIR = Path("/tmp/chatterbox_rest_api")
-_TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+_TEMP_AUDIO_DIR = temp_audio_dir("chatterbox_rest_api")
 
 
 def seed_everything(seed: int) -> None:
@@ -542,28 +543,6 @@ def _check_reference_audio(raw_bytes: bytes) -> None:
                 f"{MIN_PROMPT_DURATION_S:.0f} s is required for usable voice cloning."
             ),
         )
-
-
-def _write_temp_audio(raw_bytes: bytes) -> str:
-    """
-    Write raw audio bytes to a temporary file.
-
-    The model expects a file path (librosa loads it from disk).  The
-    .wav extension is cosmetic -- soundfile sniffs the container from the
-    header, so MP3/OGG/FLAC bytes work fine.
-    """
-    path = _TEMP_AUDIO_DIR / f"{uuid.uuid4().hex}.wav"
-    path.write_bytes(raw_bytes)
-    logger.debug("Wrote temporary reference audio: {}", path)
-    return str(path)
-
-
-def _cleanup_temp(path: str) -> None:
-    """Remove a temporary audio file if it exists."""
-    try:
-        Path(path).unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _numpy_to_wav_bytes(audio_array: np.ndarray, sample_rate: int) -> bytes:

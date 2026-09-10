@@ -56,17 +56,14 @@ Usage:
 from __future__ import annotations
 
 import base64
-import hashlib
 import io
 import os
 import random
-import tempfile
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -85,6 +82,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    stage_audio,
+    temp_audio_dir,
 )
 
 # ---------------------------------------------------------------------------
@@ -472,7 +471,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     )
 
     # Decode the reference audio in memory; the engine reads it back from a
-    # temp file (see _write_temp_audio).
+    # content-addressed staged file (see stage_audio in tts_engine_common).
     try:
         raw_audio = decode_base64(req.audio_base64)
     except ValueError as exc:
@@ -480,7 +479,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     _check_reference_audio(raw_audio)
 
-    prompt_audio_path = _write_temp_audio(raw_audio)
+    prompt_audio_path = stage_audio(raw_audio, _TEMP_AUDIO_DIR)
 
     # Only forward sampling params the client actually set, so the engine's
     # own defaults apply otherwise.
@@ -541,8 +540,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TEMP_AUDIO_DIR = Path(tempfile.gettempdir()) / "faster_qwen3_tts_rest_api"
-_TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+_TEMP_AUDIO_DIR = temp_audio_dir("faster_qwen3_tts_rest_api")
 
 
 def _check_reference_audio(raw_bytes: bytes) -> None:
@@ -562,49 +560,6 @@ def _check_reference_audio(raw_bytes: bytes) -> None:
                 f"{MIN_REF_DURATION_S:.0f} s is required for usable voice cloning."
             ),
         )
-
-
-def _write_temp_audio(raw_bytes: bytes) -> str:
-    """
-    Make the raw audio bytes available at a stable content-addressed path.
-
-    The engine's ICL path reads the reference from a file path via
-    soundfile.  The filename is the SHA-256 of the audio content rather than
-    a UUID because the engine caches the encoded voice prompt per
-    (path, transcript): content-addressed names let repeat requests with the
-    same reference clip hit that cache instead of re-encoding the audio.
-    The .wav extension is cosmetic — the loader sniffs the header, so
-    MP3/OGG/FLAC bytes work fine.
-
-    The file is deliberately kept rather than deleted per request: staging
-    happens *before* the synthesis lock is taken, so with a shared
-    content-addressed name a per-request cleanup could delete the file
-    after another request for the same clip has staged it but before that
-    request reaches its turn on the lock.  Disk usage grows only with the
-    number of *unique* clips; wipe the staging directory to reclaim space.
-    """
-    digest = hashlib.sha256(raw_bytes).hexdigest()
-    path = _TEMP_AUDIO_DIR / f"{digest}.wav"
-    if path.exists():
-        # Same clip already staged: reusing it is what makes the engine's
-        # (path, transcript) prompt cache useful, and skipping the write
-        # also keeps a queued request from clobbering a file that the
-        # request holding the synthesis lock is currently reading.
-        logger.debug("Reusing staged reference audio: {}", path)
-        return str(path)
-    # Stage into a unique sibling file and rename into place: os.replace is
-    # atomic, so no reader can ever observe a half-written clip, and a crash
-    # mid-write cannot leave a corrupt file behind the content hash (which
-    # would poison every future request for that clip).
-    staging = path.with_name(f"{digest}.wav.{uuid.uuid4().hex}.tmp")
-    try:
-        staging.write_bytes(raw_bytes)
-        os.replace(staging, path)
-    except BaseException:
-        staging.unlink(missing_ok=True)
-        raise
-    logger.debug("Staged reference audio: {}", path)
-    return str(path)
 
 
 def _numpy_to_wav_bytes(audio_array: np.ndarray, sample_rate: int) -> bytes:

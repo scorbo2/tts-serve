@@ -32,6 +32,10 @@
       "enum": null,
       "min_length": 1,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "common",
       "advanced": false
     },
@@ -47,6 +51,10 @@
       "enum": null,
       "min_length": 1,
       "max_length": 10000000,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "common",
       "advanced": false
     },
@@ -62,6 +70,10 @@
       "enum": null,
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "common",
       "advanced": false
     },
@@ -77,6 +89,10 @@
       "enum": null,
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "common",
       "advanced": false
     },
@@ -92,6 +108,10 @@
       "enum": null,
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "common",
       "advanced": false
     },
@@ -107,6 +127,10 @@
       "enum": null,
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "engine",
       "advanced": false
     },
@@ -122,6 +146,10 @@
       "enum": null,
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "engine",
       "advanced": false
     },
@@ -137,6 +165,10 @@
       "enum": null,
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "engine",
       "advanced": false
     },
@@ -156,6 +188,10 @@
       ],
       "min_length": null,
       "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
       "group": "engine",
       "advanced": false
     }

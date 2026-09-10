@@ -189,11 +189,13 @@ Top level:
 | Field | Type | Notes |
 |---|---|---|
 | `name` | string | Exact request-body field name. |
-| `type` | `string` \| `integer` \| `number` \| `boolean` | |
+| `type` | `string` \| `integer` \| `number` \| `boolean` \| `array` | |
 | `default` | any \| null | Model default; `null` = no default (required or random). |
 | `min` / `max` / `step` | number \| null | `step` from override map (JSON schema has no step). |
 | `enum` | string[] \| null | For `string` params (e.g. `language`). |
 | `min_length` / `max_length` | int \| null | For `string` params. |
+| `item_type` / `min_items` / `max_items` | … \| null | For `array` params: flat scalar item type and item-count bounds. Nested arrays / object items are rejected at import (`DerivationError`). |
+| `item_labels` | string[] \| null | For **fixed-size** `array` params (`min_items == max_items`): one non-empty display label per item, in order. From the per-server override map (the JSON schema cannot express display labels). Enforced at import: non-array, variable-size, or wrong-length labels are a construction error. |
 | `description` | string | Rendered as tooltip/help text. Keep user-facing quality. |
 | `group` | `common` \| `engine` | `common` = core-vocabulary field, app uses its polished widget; `engine` = rendered generically. |
 | `advanced` | bool, default false | App collapses `true` params behind an "Advanced" disclosure. |
@@ -208,6 +210,7 @@ Top level:
 | `string` + `enum` | select (default = "not set" option when `default: null`) |
 | `boolean` | toggle |
 | `string` plain | text input |
+| `array` + scalar `item_type` | list input (repeatable per-item inputs); app may special-case well-known shapes (e.g. fixed-size numeric vectors → one labeled row per item, using `item_labels` when present) |
 | anything unrecognized | **raw-JSON escape hatch** (forward-compat rule, §3.5) |
 
 ## 5. Shared Package: `tts-engine-common`
@@ -237,7 +240,7 @@ API sketch:
 # models.py
 class ParamSpec(BaseModel):
     name: str
-    type: Literal["string", "integer", "number", "boolean"]
+    type: Literal["string", "integer", "number", "boolean", "array"]
     default: Any = None
     description: str = ""
     min: float | None = None
@@ -246,6 +249,10 @@ class ParamSpec(BaseModel):
     enum: list[str] | None = None
     min_length: int | None = None
     max_length: int | None = None
+    item_type: Literal["string", "integer", "number", "boolean"] | None = None
+    min_items: int | None = None
+    max_items: int | None = None
+    item_labels: list[str] | None = None   # fixed-size arrays only; see §4.2
     group: Literal["common", "engine"] = "engine"
     advanced: bool = False
 

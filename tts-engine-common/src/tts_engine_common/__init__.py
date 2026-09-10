@@ -19,6 +19,12 @@ from .models import (
     ReferenceAudioSpec,
 )
 from .route import add_capabilities_route, capabilities_endpoint
+from .staging import (
+    cleanup_temp,
+    stage_audio,
+    temp_audio_dir,
+    write_temp_audio,
+)
 
 __version__ = "0.1.0"
 
@@ -35,10 +41,14 @@ __all__ = [
     "add_capabilities_route",
     "build_capabilities",
     "capabilities_endpoint",
+    "cleanup_temp",
     "compute_rtf",
     "decode_base64",
     "is_language_code",
     "normalize_language",
     "spec_from_schema",
+    "stage_audio",
+    "temp_audio_dir",
     "validate_language_code",
+    "write_temp_audio",
 ]

@@ -31,6 +31,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 | `impl/server_qwen3TTS.py` | [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Base) | 24 kHz | 10 language names + `auto`; falls back to speaker-embedding-only cloning when the transcript is omitted |
 | `impl/server_fasterQwen3TTS.py` | [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) (CUDA-graphs Qwen3-TTS fork) | 24 kHz | 10 language names + `auto`; ICL (advanced) mode only — `reference_text` is required; NVIDIA GPU required |
 | `impl/server_dotsTTS.py` | [dots.tts](https://github.com/rednote-hilab/dots.tts) | 48 kHz | flow-matching knobs (`num_steps`, `ode_method`, guidance/speaker scales) |
+| `impl/server_indexTTS.py` | [IndexTTS-2.5](https://github.com/index-tts/index-tts) | 22.05 kHz | 5 languages (`ar`/`en`/`es`/`ja`/`zh`); emotion control via a second clip, an 8-component vector, or free text (QwenEmotion); `duration_factor` length control |
 
 ## Quickstart
 
@@ -46,6 +47,7 @@ git clone https://github.com/scorbo2/tts-serve && cd tts-serve
 #   For dots.tts: pip install dots.tts
 #   For OmniVoice: pip install omnivoice
 #   For faster-qwen3-tts: pip install faster-qwen3-tts
+#   For IndexTTS-2.5: pip install git+https://github.com/index-tts/index-tts.git
 
 # Now set up the server wrapper:
 pip install ./tts-engine-common fastapi uvicorn loguru soundfile
@@ -56,6 +58,7 @@ pip install ./tts-engine-common fastapi uvicorn loguru soundfile
 #  For dots.tts: python impl/server_dotsTTS.py
 #  For OmniVoice: python impl/server_omnivoice.py
 #  For faster-qwen3-tts: python impl/server_fasterQwen3TTS.py
+#  For IndexTTS-2.5: python impl/server_indexTTS.py
 ```
 
 On first run, the model weights will be downloaded from HuggingFace.
@@ -128,7 +131,7 @@ for how the endpoint is generated.
 ```
 tts-engine-common/   Shared FastAPI/Pydantic package (no torch): capabilities
                      derivation, core models, /capabilities route, helpers.
-impl/                The five engine servers + their (GPU-free) tests.
+impl/                The six engine servers + their (GPU-free) tests.
 docs/                Design documents.
 ```
 
@@ -136,7 +139,7 @@ docs/                Design documents.
 
 ```bash
 # Full test suite (works on a dev box with no torch/GPU — see impl/README.md)
-python -m pytest tts-engine-common/tests/ impl/tests/
+python -m pytest tts-engine-common/tests/ impl/tests/ tools/tests/
 
 # Regenerate the /capabilities snapshots after changing a request schema
 python impl/tests/update_snapshots.py

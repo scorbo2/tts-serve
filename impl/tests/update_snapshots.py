@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import server_chatterbox  # noqa: E402
 import server_dotsTTS  # noqa: E402
 import server_fasterQwen3TTS  # noqa: E402
+import server_indexTTS  # noqa: E402
 import server_omnivoice  # noqa: E402
 import server_qwen3TTS  # noqa: E402
 
@@ -40,6 +41,7 @@ ENGINES = (
     (server_qwen3TTS, "qwen3_capabilities.json"),
     (server_fasterQwen3TTS, "faster_qwen3_capabilities.json"),
     (server_dotsTTS, "dots_capabilities.json"),
+    (server_indexTTS, "indextts_capabilities.json"),
 )
 
 

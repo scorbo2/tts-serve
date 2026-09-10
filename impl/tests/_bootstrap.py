@@ -42,3 +42,7 @@ def setup() -> None:
     os.environ["FASTER_QWEN3TTS_DEVICE"] = "cuda"
     os.environ.pop("FASTER_QWEN3TTS_MODEL", None)  # default: Qwen/Qwen3-TTS-12Hz-1.7B-Base
     os.environ.pop("DOTS_TTS_MODEL", None)       # default: rednote-hilab/dots.tts-soar
+    os.environ.pop("INDEXTTS_MODEL_DIR", None)   # default: checkpoints
+    os.environ.pop("INDEXTTS_DEVICE", None)      # default: auto-select (stub torch -> 'cpu')
+    os.environ.pop("INDEXTTS_USE_BF16", None)
+    os.environ.pop("INDEXTTS_USE_QWEN_EMO", None)
