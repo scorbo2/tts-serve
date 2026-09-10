@@ -32,8 +32,11 @@ a field's `name` or `type`) are rejected at import time.
 | `Capabilities` / `ParamSpec` / `ReferenceAudioSpec` | The document models (all `extra="forbid"`). |
 | `decode_base64(data) -> bytes` | Strict base64 decode (`validate=True`); `ValueError` on malformed input. |
 | `compute_rtf(time_used_s, num_samples, sample_rate) -> float \| None` | Real-time factor; `None` when the duration is zero or the result non-finite. |
+| `temp_audio_dir(name) -> Path` | Per-server staging directory under the system temp dir (created). Respects `$TMPDIR`. |
+| `stage_audio(raw_bytes, directory) -> str` | Content-addressed (SHA-256) staging, written atomically, file **kept**. For engines that cache conditioning per path (repeat requests with the same clip reuse the file). |
+| `write_temp_audio(raw_bytes, directory) -> str` / `cleanup_temp(path)` | One-shot UUID-named staging + best-effort removal. For engines that read the prompt once and do not cache by path. |
 | `CORE_FIELDS` | The common vocabulary: `{"text", "audio_base64", "reference_text", "language", "seed"}`. Fields in this set are tagged `group: "common"` in the document. |
-| `SCHEMA_VERSION` | Currently `1`; bump only on breaking document changes. |
+| `SCHEMA_VERSION` | Currently `2`; bump only on breaking document changes. |
 
 ### Minimal usage
 
@@ -81,7 +84,7 @@ app.add_api_route("/capabilities", capabilities_endpoint(doc), methods=["GET"])
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "chatterbox",                  // stable slug
   "model": "chatterbox-multilingual-v3",   // checkpoint in use
   "device": "cuda",
@@ -99,16 +102,23 @@ app.add_api_route("/capabilities", capabilities_endpoint(doc), methods=["GET"])
   "parameters": [
     {
       "name": "text",
-      "type": "string",                    // string | integer | number | boolean
+      "type": "string",                    // string | integer | number | boolean | array
       "required": true,                    // no default in the model => required
       "default": null,
       "description": "Text to synthesize.",
       "min": null, "max": null, "step": null,
       "enum": null,
       "min_length": 1, "max_length": null,
+      "item_type": null, "min_items": null, "max_items": null,
+      "item_labels": null,
       "group": "common",                   // "common" | "engine"
       "advanced": false
     }
+    // For "type": "array", the item fields describe the elements, e.g.:
+    // { "name": "emotion_vector", "type": "array", "item_type": "number",
+    //   "min_items": 8, "max_items": 8,
+    //   "item_labels": ["happy", "angry", "sad", "afraid", "disgusted",
+    //                   "melancholic", "surprised", "calm"], ... }
     // ...
   ]
 }
@@ -124,13 +134,24 @@ Notes:
   are normalized to the inclusive key by the derivation).
 - `languages: null` means "the engine accepts free-form language input" —
   do not treat it as "no languages supported".
+- `item_type`/`min_items`/`max_items` are only meaningful for `"array"`
+  parameters (null otherwise). Array items are always flat scalars —
+  nested arrays and object items are rejected at import time.
+- `item_labels` (per-item display labels) is only valid for **fixed-size**
+  arrays: `min_items == max_items` with one non-empty label per item, or the
+  `ParamSpec` construction fails at import. It is carried via the
+  per-server override map (`build_capabilities(..., overrides={...})`),
+  since the JSON schema cannot express display labels.
 
 ## Known limitations
 
-- Supported field types: `string`, `integer`, `number`, `boolean` (including
-  `X | None` unions and `Literal` enums). Any other JSON Schema shape (arrays,
-  nested objects, ambiguous unions) raises `DerivationError` at import time
-  rather than emitting a document that misdescribes validation.
+- Supported field types: `string`, `integer`, `number`, `boolean` and `array`
+  (including `X | None` unions and `Literal` enums). Arrays must have flat
+  scalar items (`item_type` ∈ string/integer/number/boolean) plus optional
+  `min_items`/`max_items` (and optional `item_labels` for fixed-size
+  arrays, via overrides). Any other JSON Schema shape (nested arrays,
+  objects as items, ambiguous unions) raises `DerivationError` at import
+  time rather than emitting a document that misdescribes validation.
 - `step` is a UI hint, not validation — the model's own bounds are enforced.
 - The document is static for the server's lifetime (it describes the request
   schema, which is fixed at import time). No `Cache-Control` header is sent:

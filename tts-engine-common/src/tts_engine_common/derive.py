@@ -17,7 +17,10 @@ from .models import Capabilities, ParamSpec, ReferenceAudioSpec
 
 # JSON Schema types we understand. Anything else is a loud error (R1: never
 # silently emit a capabilities document that misdescribes validation).
-_SUPPORTED_TYPES = ("string", "integer", "number", "boolean")
+_SCALAR_TYPES = ("string", "integer", "number", "boolean")
+# 'array' is supported with flat scalar items only (see spec_from_schema);
+# nested arrays and object items still raise DerivationError.
+_SUPPORTED_TYPES = _SCALAR_TYPES + ("array",)
 
 # Override keys that would lie about what the request model actually accepts.
 _FORBIDDEN_OVERRIDE_KEYS = ("name", "type")
@@ -65,6 +68,22 @@ def _enum_values(branch: dict[str, Any]) -> list[str] | None:
     return [v if isinstance(v, str) else str(v) for v in values]
 
 
+def _array_item_type(name: str, branch: dict[str, Any]) -> str:
+    """Validate and return the item type of an array branch.
+
+    Only flat scalar item types are supported: a client rendering an array
+    widget needs a single item type to render per-item inputs. Nested arrays
+    and object items raise DerivationError (loud, at import time).
+    """
+    items = branch.get("items")
+    if not isinstance(items, dict) or items.get("type") not in _SCALAR_TYPES:
+        raise DerivationError(
+            f"Unsupported JSON schema array items for field {name!r}: {items!r}; "
+            "only flat scalar item types are supported."
+        )
+    return items["type"]
+
+
 def spec_from_schema(name: str, schema: dict[str, Any]) -> ParamSpec:
     """Map one JSON Schema property to a ParamSpec.
 
@@ -80,6 +99,17 @@ def spec_from_schema(name: str, schema: dict[str, Any]) -> ParamSpec:
     # missing key means the client must supply the field.
     has_default = "default" in schema
 
+    item_type: str | None = None
+    if field_type == "array":
+        item_type = _array_item_type(name, branch)
+        # minItems/maxItems are the array analogues of minLength/maxLength;
+        # other bounds keys do not exist on array schemas.
+        min_items = branch.get("minItems")
+        max_items = branch.get("maxItems")
+    else:
+        min_items = None
+        max_items = None
+
     return ParamSpec(
         name=name,
         type=field_type,  # type: ignore[arg-type]  # checked against _SUPPORTED_TYPES above
@@ -91,6 +121,9 @@ def spec_from_schema(name: str, schema: dict[str, Any]) -> ParamSpec:
         enum=_enum_values(branch),
         min_length=branch.get("minLength"),
         max_length=branch.get("maxLength"),
+        item_type=item_type,  # type: ignore[arg-type]  # checked against _SCALAR_TYPES in _array_item_type
+        min_items=min_items,
+        max_items=max_items,
         group="common" if name in CORE_FIELDS else "engine",
     )
 

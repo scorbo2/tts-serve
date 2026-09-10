@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .core import SCHEMA_VERSION
 
@@ -21,7 +21,7 @@ class ParamSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1)
-    type: Literal["string", "integer", "number", "boolean"]
+    type: Literal["string", "integer", "number", "boolean", "array"]
     required: bool = Field(
         False,
         description=(
@@ -37,11 +37,55 @@ class ParamSpec(BaseModel):
     enum: list[str] | None = Field(None, description="Allowed string values (enum/Literal fields).")
     min_length: int | None = Field(None, description="Minimum string length.")
     max_length: int | None = Field(None, description="Maximum string length.")
+    item_type: Literal["string", "integer", "number", "boolean"] | None = Field(
+        None, description="Item type for 'array' parameters; null for all other types."
+    )
+    min_items: int | None = Field(None, description="Minimum number of items ('array' parameters only).")
+    max_items: int | None = Field(None, description="Maximum number of items ('array' parameters only).")
+    item_labels: list[str] | None = Field(
+        None,
+        description=(
+            "Per-item display labels ('array' parameters only): one non-empty "
+            "label per item, in order. Only valid for fixed-size arrays "
+            "(min_items == max_items); null for variable-size arrays and all "
+            "other types. Carried via the per-server override map — the JSON "
+            "schema cannot express display labels."
+        ),
+    )
     group: Literal["common", "engine"] = Field(
         "engine",
         description="'common' fields come from the shared vocabulary; 'engine' fields are engine-specific.",
     )
     advanced: bool = Field(False, description="UI hint: tuck this parameter into an advanced section.")
+
+    @model_validator(mode="after")
+    def _check_item_labels(self) -> ParamSpec:
+        """Enforce the item_labels contract (see the field description).
+
+        With a variable item count, position N would name a different item on
+        each request — a label that lies about what it labels. Enforced at the
+        model level so both the derivation path and the override path fail at
+        import time, not when a client renders the document.
+        """
+        if self.item_labels is None:
+            return self
+        # An unbounded array (both bounds None) is variable size too: without
+        # the explicit None check, None == None would let it through as a
+        # "fixed-size" array of size None, and the length check below would
+        # then compare against None with a nonsense error message.
+        if self.type != "array" or self.min_items is None or self.min_items != self.max_items:
+            raise ValueError(
+                f"item_labels for {self.name!r} requires a fixed-size array "
+                "(type 'array' with min_items == max_items)"
+            )
+        if len(self.item_labels) != self.min_items:
+            raise ValueError(
+                f"item_labels for {self.name!r} has {len(self.item_labels)} "
+                f"entries, but the parameter declares exactly {self.min_items} items"
+            )
+        if not all(label.strip() for label in self.item_labels):
+            raise ValueError(f"item_labels for {self.name!r} must be non-empty strings")
+        return self
 
 
 class ReferenceAudioSpec(BaseModel):

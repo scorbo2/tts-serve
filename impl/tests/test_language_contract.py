@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 import server_chatterbox
 import server_dotsTTS
 import server_fasterQwen3TTS
+import server_indexTTS
 import server_omnivoice
 import server_qwen3TTS
 from helpers import b64, make_wav_bytes
@@ -30,8 +31,9 @@ SERVERS = [
     (server_qwen3TTS, True),
     (server_fasterQwen3TTS, True),
     (server_dotsTTS, True),
+    (server_indexTTS, False),
 ]
-SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "faster-qwen3-tts", "dots-tts"]
+SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "faster-qwen3-tts", "dots-tts", "index-tts"]
 
 
 @pytest.fixture(params=SERVERS, ids=SERVER_IDS)
@@ -128,15 +130,30 @@ def test_synthesize_language_nonConforming_rejected(server_contract, client, raw
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("code", ["en", "fr", "de"])
-def test_synthesize_language_validCode_passesValidation(server_contract, client, fake_runtime, code):
+def _valid_codes(module):
+    """Codes the engine under test actually accepts.
+
+    'en' is the contract default on every server; the other codes come from
+    the server's advertised language list.  Engines without a fixed list
+    (capabilities ``languages: null``) accept any two-letter code, so the
+    historical arbitrary pair applies there.
+    """
+    languages = module.CAPABILITIES.languages
+    if languages is None:
+        return ["en", "fr", "de"]
+    extras = [code for code in languages if code != "en"]
+    return ["en", *extras[:2]]
+
+
+def test_synthesize_language_validCode_passesValidation(server_contract, client, fake_runtime):
     # A conforming code must clear request validation; with undecodable
     # audio the handler then fails its 400 audio pre-flight — proving we
     # got past validation (actual synthesis needs a real model + GPU).
     module, _ = server_contract
-    payload = _undecodable_audio_payload(module)
-    payload["language"] = code
-    assert client.post("/synthesize", json=payload).status_code == 400
+    for code in _valid_codes(module):
+        payload = _undecodable_audio_payload(module)
+        payload["language"] = code
+        assert client.post("/synthesize", json=payload).status_code == 400
 
 
 def test_synthesize_language_autoSentinel_matchesDeclaration(server_contract, client, fake_runtime):

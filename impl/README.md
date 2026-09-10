@@ -19,6 +19,7 @@ One FastAPI server per TTS engine. Each server:
 | `server_qwen3TTS.py` | Qwen3-TTS Base | 24 kHz | `QWEN3TTS_DEVICE` (default cuda) | `QWEN3TTS_MODEL` (default `Qwen/Qwen3-TTS-12Hz-1.7B-Base`) |
 | `server_fasterQwen3TTS.py` | faster-qwen3-tts (CUDA-graphs Qwen3-TTS fork) | 24 kHz | `FASTER_QWEN3TTS_DEVICE` (must be `cuda` or `cuda:N` — no CPU/MPS backend; default cuda) | `FASTER_QWEN3TTS_MODEL` (default `Qwen/Qwen3-TTS-12Hz-1.7B-Base`) |
 | `server_dotsTTS.py` | dots.tts | 48 kHz | — (the runtime auto-selects CUDA/CPU) | `DOTS_TTS_MODEL` (default `rednote-hilab/dots.tts-soar`) |
+| `server_indexTTS.py` | IndexTTS-2.5 | 22.05 kHz | `INDEXTTS_DEVICE` (`cuda`/`cuda:N`/`cpu`/`mps`/`xpu`; unset = engine auto-selects) | `INDEXTTS_MODEL_DIR` (checkpoint dir, downloaded from `IndexTeam/IndexTTS-2.5` if it lacks `config.yaml`; default `checkpoints`) |
 
 All servers also take `*_HOST` (default `0.0.0.0`) and `*_PORT`
 (default `7500`).
@@ -32,7 +33,9 @@ python server_{server}.py          # or: uvicorn server_{server}:app
 ```
 
 Engine packages: `chatterbox-tts`, `omnivoice`, `qwen-tts`, `faster-qwen3-tts`,
-`dots.tts`.
+`dots.tts`, and for IndexTTS-2.5 the repository build
+(`pip install git+https://github.com/index-tts/index-tts.git` — it must ship
+`indextts/infer_v2_5.py`).
 The full parameter list for each server is at its `GET /capabilities` —
 don't trust this README over that endpoint, the schema is the source of truth.
 
@@ -46,7 +49,10 @@ format differs map it at their own server — the client never sees it:
 
 - **Qwen3-TTS** maps codes to lowercase names (`en` → `english`);
 - **faster-qwen3-tts** maps codes to lowercase names (`en` → `english`);
-- **dots.tts** maps codes to uppercase (`en` → `EN`).
+- **dots.tts** maps codes to uppercase (`en` → `EN`);
+- **IndexTTS-2.5** maps codes to uppercase (`en` → `EN`) and accepts only
+  the five advertised codes (`ar`, `en`, `es`, `ja`, `zh`) — anything else
+  422s, because the engine would silently degrade to its `common` vocabulary.
 
 Engines with auto-detection expose it as the special value `auto`
 (Qwen3-TTS, faster-qwen3-tts, dots.tts).
@@ -73,6 +79,21 @@ Engines with auto-detection expose it as the special value `auto`
   demands a file path for the prompt audio, so the server writes a temp file;
   the reference transcript is optional. `language` takes two-letter codes or
   `auto` (mapped to the engine's uppercase codes / `auto_detect`).
+- **IndexTTS-2.5** — 22.05 kHz output (third distinct rate). No
+  `reference_text` field: it conditions on the reference audio alone, and
+  only its first 15 s are used (hard cut). The engine wants file paths for
+  prompt audio, so reference clips are staged as content-hashed (SHA-256)
+  temp files that are *kept* — the model caches conditioning per path, so
+  per-request deletion would race a queued request for the same clip; wipe
+  the staging dir to reclaim space. Emotion is steered with at most one of
+  `emotion_audio_base64` (a second clip; `emotion_alpha` blends it with the
+  speaker's own emotion),   `emotion_vector` (8 components
+  `[happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]` —
+  the same names the capabilities doc advertises in `item_labels`), or
+  `emotion_text` (free text; requires starting the server with
+  `INDEXTTS_USE_QWEN_EMO=1`, else 400). `duration_factor` stretches
+  (>1) / compresses (<1) output length. `seed` is best-effort (the engine's
+  inference API has no seed parameter).
 
 ## Tests (`tests/`)
 
@@ -109,10 +130,11 @@ Regenerate after changing a server's request schema (or engine constants):
 python tests/update_snapshots.py
 ```
 
-Then review the diff. The dots.tts snapshot records the `device` observed on
-the generating machine; its test compares everything except `device`
-(machine-dependent: CUDA if available, else CPU) and only asserts the value
-is `cuda` or `cpu`.
+Then review the diff. The dots.tts and IndexTTS-2.5 snapshots record the
+`device` observed on the generating machine; their tests compare everything
+except `device` (machine-dependent — the runtime auto-selects) and only
+assert the value is a sane one (`cuda`/`cpu` for dots.tts;
+`cuda`/`cpu`/`mps`/`xpu` for IndexTTS-2.5).
 
 ### Gotchas
 

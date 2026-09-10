@@ -12,7 +12,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, Field
 
-from tts_engine_common import SCHEMA_VERSION, DerivationError, build_capabilities
+from tts_engine_common import SCHEMA_VERSION, DerivationError, ParamSpec, build_capabilities
 
 METADATA = dict(
     engine="test-engine",
@@ -226,11 +226,60 @@ class TestMisc:
         # THEN the parameters keep the declaration order:
         assert [p.name for p in doc.parameters] == ["zeta", "alpha", "mid"]
 
-    def test_derive_arrayField_raisesDerivationError(self) -> None:
-        # GIVEN a field whose JSON schema is an array type (unsupported by
-        # the ParamSpec contract):
+    def test_derive_floatListOptionalWithBounds_arrayNotRequiredWithItemMeta(self) -> None:
+        # GIVEN an optional list-of-floats field with item-count bounds
+        # (the IndexTTS2 emotion-vector shape: exactly 8 components):
         class Request(BaseModel):
-            tags: list[str] = []
+            emotion_vector: list[float] | None = Field(None, min_length=8, max_length=8)
+
+        # WHEN derived (the array shape lives on the non-null anyOf branch):
+        doc = build_capabilities(Request, **METADATA)
+        spec = _spec(doc, "emotion_vector")
+
+        # THEN it maps to an array of numbers with the item-count bounds:
+        assert spec.type == "array"
+        assert spec.item_type == "number"
+        assert spec.min_items == 8
+        assert spec.max_items == 8
+        assert spec.required is False
+        assert spec.default is None
+
+    def test_derive_strListRequired_arrayRequiredWithMinItems(self) -> None:
+        # GIVEN a required list-of-strings field with a minimum item count:
+        class Request(BaseModel):
+            tags: list[str] = Field(..., min_length=1)
+
+        # WHEN derived:
+        doc = build_capabilities(Request, **METADATA)
+        spec = _spec(doc, "tags")
+
+        # THEN the item type and count bound come through, and the field is required:
+        assert spec.type == "array"
+        assert spec.item_type == "string"
+        assert spec.min_items == 1
+        assert spec.max_items is None
+        assert spec.required is True
+
+    def test_derive_scalarField_arrayMetaStaysNull(self) -> None:
+        # GIVEN a plain scalar field:
+        class Request(BaseModel):
+            seed: int = 1
+
+        # WHEN derived:
+        doc = build_capabilities(Request, **METADATA)
+        spec = _spec(doc, "seed")
+
+        # THEN the array-only metadata is absent (null), not misapplied:
+        assert spec.item_type is None
+        assert spec.min_items is None
+        assert spec.max_items is None
+        assert spec.item_labels is None
+
+    def test_derive_nestedArrayItems_raisesDerivationError(self) -> None:
+        # GIVEN a field whose JSON schema is an array of arrays (unsupported
+        # shape: no single scalar item type to render):
+        class Request(BaseModel):
+            matrix: list[list[int]] = []
 
         # WHEN derived,
         # THEN it raises loudly instead of emitting a misdescribing document:
@@ -270,6 +319,36 @@ class TestOverrides:
         # THEN the override values are merged onto the derived spec:
         assert spec.step == 0.05
         assert spec.advanced is True
+
+    def test_overrides_itemLabelsOnFixedArray_areApplied(self) -> None:
+        # GIVEN a fixed-size array field (labels cannot come from the JSON
+        # schema — display names are server knowledge):
+        class Request(BaseModel):
+            emotion_vector: list[float] | None = Field(None, min_length=3, max_length=3)
+
+        # WHEN derived with an override carrying one label per item:
+        doc = build_capabilities(
+            Request,
+            **METADATA,
+            overrides={"emotion_vector": {"item_labels": ["happy", "sad", "calm"]}},
+        )
+        spec = _spec(doc, "emotion_vector")
+
+        # THEN the labels are merged onto the derived spec, in order:
+        assert spec.item_labels == ["happy", "sad", "calm"]
+
+    def test_overrides_itemLabels_wrongLength_raisesValueError(self) -> None:
+        # GIVEN a fixed 3-item array and labels for only 2 items:
+        class Request(BaseModel):
+            emotion_vector: list[float] | None = Field(None, min_length=3, max_length=3)
+
+        # WHEN derived,
+        # THEN the merged spec is rejected — a label that lies about what it
+        # labels is worse than no label:
+        with pytest.raises(ValueError, match="Invalid capabilities override"):
+            build_capabilities(
+                Request, **METADATA, overrides={"emotion_vector": {"item_labels": ["a", "b"]}}
+            )
 
     def test_overrides_unknownField_raisesValueError(self) -> None:
         # GIVEN an override referencing a field the model does not have:
@@ -344,3 +423,62 @@ class TestDocumentMetadata:
         # bumps fail here deliberately rather than drifting):
         assert doc.endpoint == "/synthesize"
         assert doc.schema_version == SCHEMA_VERSION
+
+
+class TestItemLabels:
+    """item_labels is only meaningful for a fixed-size array.
+
+    A label that names a shifting position (variable size) or a wrong count
+    lies about what it labels — reject it at construction, not render time.
+    """
+
+    def _fixed_array(self, **overrides) -> ParamSpec:
+        base = dict(
+            name="emotion_vector",
+            type="array",
+            item_type="number",
+            min_items=3,
+            max_items=3,
+        )
+        base.update(overrides)
+        return ParamSpec(**base)
+
+    def test_item_labels_validFixedArray_isAccepted(self) -> None:
+        # GIVEN a fixed 3-item array with exactly 3 labels:
+        spec = self._fixed_array(item_labels=["happy", "sad", "calm"])
+
+        # THEN it is accepted verbatim:
+        assert spec.item_labels == ["happy", "sad", "calm"]
+
+    def test_item_labels_onNonArray_rejected(self) -> None:
+        # GIVEN a scalar field that somehow carries labels:
+        with pytest.raises(ValueError, match="requires a fixed-size array"):
+            ParamSpec(name="seed", type="integer", item_labels=["one"])
+
+    def test_item_labels_onVariableSizeArray_rejected(self) -> None:
+        # GIVEN an array whose size is not pinned (min != max):
+        with pytest.raises(ValueError, match="requires a fixed-size array"):
+            self._fixed_array(max_items=None, item_labels=["a", "b", "c"])
+
+    def test_item_labels_onUnboundedArray_rejected(self) -> None:
+        # GIVEN an array with no item bounds at all (min_items == max_items == None),
+        # which is variable size despite None == None:
+        with pytest.raises(ValueError, match="requires a fixed-size array"):
+            self._fixed_array(min_items=None, max_items=None, item_labels=["a", "b"])
+
+    def test_item_labels_wrongLength_rejected(self) -> None:
+        # GIVEN a fixed 3-item array with only 2 labels:
+        with pytest.raises(ValueError, match="has 2 entries"):
+            self._fixed_array(item_labels=["a", "b"])
+
+    def test_item_labels_blankEntry_rejected(self) -> None:
+        # GIVEN a label that is only whitespace:
+        with pytest.raises(ValueError, match="non-empty"):
+            self._fixed_array(item_labels=["happy", "sad", "   "])
+
+    def test_item_labels_absent_isNull(self) -> None:
+        # GIVEN a fixed array with no labels supplied:
+        spec = self._fixed_array()
+
+        # THEN the field defaults to null (engine provides no labels):
+        assert spec.item_labels is None

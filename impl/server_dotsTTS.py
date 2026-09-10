@@ -42,9 +42,7 @@ import io
 import math
 import os
 import random
-import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Literal
 
 import soundfile as sf
@@ -61,9 +59,12 @@ from tts_engine_common import (
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    cleanup_temp,
     decode_base64,
     normalize_language,
+    temp_audio_dir,
     validate_language_code,
+    write_temp_audio,
 )
 
 # ---------------------------------------------------------------------------
@@ -395,7 +396,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     # The runtime insists on a file path for prompt audio, hence the temp
     # file (the .wav extension is cosmetic — the loader sniffs the header).
-    prompt_audio_path = _write_temp_audio(raw_audio)
+    prompt_audio_path = write_temp_audio(raw_audio, _TEMP_AUDIO_DIR)
 
     try:
         result = runtime.generate(
@@ -436,15 +437,14 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         # Clean up the temporary prompt audio file.
-        _cleanup_temp(prompt_audio_path)
+        cleanup_temp(prompt_audio_path)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TEMP_AUDIO_DIR = Path("/tmp/dots_tts_rest_api")
-_TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+_TEMP_AUDIO_DIR = temp_audio_dir("dots_tts_rest_api")
 
 
 def _to_engine_language(language: str) -> str:
@@ -475,28 +475,6 @@ def _check_reference_audio(raw_bytes: bytes) -> None:
                 f"{MIN_REF_DURATION_S:.0f} s is required for usable voice cloning."
             ),
         )
-
-
-def _write_temp_audio(raw_bytes: bytes) -> str:
-    """
-    Write raw audio bytes to a temporary file.
-
-    The runtime expects a file path for prompt audio.  The .wav extension is
-    cosmetic — the loader sniffs the container from the header, so
-    MP3/OGG/FLAC bytes work fine.
-    """
-    path = _TEMP_AUDIO_DIR / f"{uuid.uuid4().hex}.wav"
-    path.write_bytes(raw_bytes)
-    logger.debug("Wrote temporary reference audio: {}", path)
-    return str(path)
-
-
-def _cleanup_temp(path: str) -> None:
-    """Remove a temporary audio file if it exists."""
-    try:
-        Path(path).unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _tensor_to_wav_bytes(audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
