@@ -12,30 +12,18 @@ One FastAPI server per TTS engine. Each server:
 - rejects unknown fields (`422`) and bad reference audio (`400`) before
   touching the model.
 
-| File | Engine | Output rate | Device env | Model env |
-|---|---|---|---|---|
-| `server_chatterbox.py` | Chatterbox multilingual | 24 kHz | `CHATTERBOX_DEVICE` (cuda/mps/cpu, default cuda) | `CHATTERBOX_T3_MODEL` (v2/v3 or a `.safetensors` name, default v3) |
-| `server_omnivoice.py` | OmniVoice | 24 kHz | `OMNIVOICE_DEVICE` (default cuda) | `OMNIVOICE_MODEL` (HF id or path, default `k2-fsa/OmniVoice`) |
-| `server_qwen3TTS.py` | Qwen3-TTS Base | 24 kHz | `QWEN3TTS_DEVICE` (default cuda) | `QWEN3TTS_MODEL` (default `Qwen/Qwen3-TTS-12Hz-1.7B-Base`) |
-| `server_fasterQwen3TTS.py` | faster-qwen3-tts (CUDA-graphs Qwen3-TTS fork) | 24 kHz | `FASTER_QWEN3TTS_DEVICE` (must be `cuda` or `cuda:N` — no CPU/MPS backend; default cuda) | `FASTER_QWEN3TTS_MODEL` (default `Qwen/Qwen3-TTS-12Hz-1.7B-Base`) |
-| `server_dotsTTS.py` | dots.tts | 48 kHz | — (the runtime auto-selects CUDA/CPU) | `DOTS_TTS_MODEL` (default `rednote-hilab/dots.tts-soar`) |
-| `server_indexTTS.py` | IndexTTS-2.5 | 22.05 kHz | `INDEXTTS_DEVICE` (`cuda`/`cuda:N`/`cpu`/`mps`/`xpu`; unset = engine auto-selects) | `INDEXTTS_MODEL_DIR` (checkpoint dir, downloaded from `IndexTeam/IndexTTS-2.5` if it lacks `config.yaml`; default `checkpoints`) |
+More information:
 
-All servers also take `*_HOST` (default `0.0.0.0`) and `*_PORT`
-(default `7500`).
+- [Chatterbox](server_chatterbox.md)
+- [OmniVoice](server_omnivoice.md)
+- [Qwen3-TTS](server_qwen3TTS.md)
+- [Faster Qwen3-TTS](server_fasterQwen3TTS.md)
+- [dots.tts](server_dotsTTS.md)
+- [Index-TTS](server_indexTTS.md)
+
 
 ## Running
 
-```bash
-pip install <engine-package> fastapi uvicorn loguru soundfile
-pip install ../tts-engine-common   # or: pip install -e ../tts-engine-common
-python server_{server}.py          # or: uvicorn server_{server}:app
-```
-
-Engine packages: `chatterbox-tts`, `omnivoice`, `qwen-tts`, `faster-qwen3-tts`,
-`dots.tts`, and for IndexTTS-2.5 the repository build
-(`pip install git+https://github.com/index-tts/index-tts.git` — it must ship
-`indextts/infer_v2_5.py`).
 The full parameter list for each server is at its `GET /capabilities` —
 don't trust this README over that endpoint, the schema is the source of truth.
 

@@ -1,8 +1,9 @@
 # TTS Server Generification — Development Plan
 
-Status: **PROPOSAL — under review, no code written yet**
-Date: 2026-08-30
-Scope: All four TTS REST servers (Chatterbox, OmniVoice, Qwen3-TTS, dots.tts) + TalkWithMe (or other client apps).
+Status: **Finalized**
+Date: Written 2026-08-30; released as v1.0 2026-09-10
+Scope: Four TTS REST servers supported by the old code (Chatterbox, OmniVoice, Qwen3-TTS, dots.tts) and two more supported by this new code (fasterQwen3TTS, IndexTTS)
+Clients: `speak.py` example command-line script (bundled in this repo), `TalkWithMe` application (external project)
 
 ---
 
@@ -22,7 +23,7 @@ Scope: All four TTS REST servers (Chatterbox, OmniVoice, Qwen3-TTS, dots.tts) + 
 
 ## 1. Problem
 
-We run four TTS engines behind hand-rolled FastAPI servers, each with a different generation-parameter surface (e.g. Chatterbox: `exaggeration`, `cfg_weight`, `language`; OmniVoice: `guidance_scale`, `speaker_scale`, `ode_method`, `num_steps`). The client app today speaks a lowest-common-denominator API. Result:
+We previously ran four TTS engines behind hand-rolled FastAPI servers, each with a different generation-parameter surface (e.g. Chatterbox: `exaggeration`, `cfg_weight`, `language`; OmniVoice: `guidance_scale`, `speaker_scale`, `ode_method`, `num_steps`). The client app today speaks a lowest-common-denominator API. Result:
 
 - Engine-unique features are unreachable from the app, or
 - They get bolted onto the shared schema ad hoc, polluting every other engine's contract, or
