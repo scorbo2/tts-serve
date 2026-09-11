@@ -75,10 +75,10 @@ python impl/server_chatterbox.py
 By default, Chatterbox will run on `cuda`. To force a different device:
 
 ```
-CHATTERBOX_DEVICE=cpu
+export CHATTERBOX_DEVICE=cpu
 python impl/server_chatterbox.py
 
-CHATTERBOX_DEVICE=mps
+export CHATTERBOX_DEVICE=mps
 python impl/server_chatterbox.py
 ```
 
