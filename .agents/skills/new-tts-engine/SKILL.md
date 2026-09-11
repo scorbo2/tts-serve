@@ -155,8 +155,9 @@ Copy `test_server_chatterbox.py`'s structure:
 4. Regenerate and review: `python impl/tests/update_snapshots.py`, then
    `git diff impl/tests/snapshots/`. Never hand-edit a snapshot — capabilities are derived
    from the Pydantic model (D4).
-5. Tables: `impl/README.md` (file/engine/rate/device-env/model-env row + an engine-notes
-   bullet) and the root `README.md` Engines table.
+5. Add `impl/server_{newEngine}.md` with engine notes and installation/run instructions.
+   Follow the pattern of other server-specific markdown files in `impl`.
+6. Docs: add link to engine-specific doc to `impl/README.md` and the root `README.md` Engines list.
 
 ## Verify
 
