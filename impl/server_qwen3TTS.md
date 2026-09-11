@@ -72,10 +72,10 @@ python impl/server_qwen3TTS.py
 By default, Qwen3-TTS will run on `cuda`. To force a different device:
 
 ```
-QWEN3TTS_DEVICE=cpu
+export QWEN3TTS_DEVICE=cpu
 python impl/server_qwen3TTS.py
 
-QWEN3TTS_DEVICE=mps
+export QWEN3TTS_DEVICE=mps
 python impl/server_qwen3TTS.py
 ```
 
