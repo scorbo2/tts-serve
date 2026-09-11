@@ -27,7 +27,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [Chatterbox](impl/server_chatterbox.md)
 - [OmniVoice](impl/server_omnivoice.md)
 - [Qwen3-TTS](impl/server_qwen3TTS.md)
-- [Faster Qwen3TTS](impl/server_fasterQwen3TTS.md)
+- [Faster Qwen3-TTS](impl/server_fasterQwen3TTS.md)
 - [dots.tts](impl/server_dotsTTS.md)
 - [Index-TTS](impl/server_indexTTS.md)
 
