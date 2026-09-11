@@ -72,10 +72,10 @@ python impl/server_omnivoice.py
 By default, OmniVoice will run on `cuda`. To force a different device:
 
 ```
-OMNIVOICE_DEVICE=cpu
+export OMNIVOICE_DEVICE=cpu
 python impl/server_omnivoice.py
 
-OMNIVOICE_DEVICE=mps
+export OMNIVOICE_DEVICE=mps
 python impl/server_omnivoice.py
 ```
 
