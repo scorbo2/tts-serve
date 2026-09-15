@@ -397,7 +397,7 @@ def _get_runtime() -> LuxTTSRuntime:
     global _runtime
     if _runtime is None:
         logger.info(
-            "Loading LuxTTS model '%s' on device '%s' (first run downloads "
+            "Loading LuxTTS model '{}' on device '{}' (first run downloads "
             "from HuggingFace) ...",
             MODEL_NAME_OR_PATH,
             DEVICE,
@@ -412,7 +412,7 @@ def _get_runtime() -> LuxTTSRuntime:
             device=str(model.device),
         )
         logger.info(
-            "Model loaded successfully. Sampling rate: %d Hz, device: %s",
+            "Model loaded successfully. Sampling rate: {} Hz, device: {}",
             _runtime.sample_rate,
             _runtime.device,
         )
