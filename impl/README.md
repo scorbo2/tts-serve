@@ -20,6 +20,7 @@ More information:
 - [Faster Qwen3-TTS](server_fasterQwen3TTS.md)
 - [dots.tts](server_dotsTTS.md)
 - [Index-TTS](server_indexTTS.md)
+- [LuxTTS](server_luxTTS.md)
 
 
 ## Running
@@ -44,6 +45,11 @@ format differs map it at their own server — the client never sees it:
 
 Engines with auto-detection expose it as the special value `auto`
 (Qwen3-TTS, faster-qwen3-tts, dots.tts).
+
+**LuxTTS** is the no-support case: the engine has no language parameter at
+all (its tokenizer auto-detects English and Chinese per text segment), so the
+server accepts any well-formed two-letter code for API consistency, does not
+forward it, and advertises `languages: null` in capabilities.
 
 ## Engine-specific notes
 
@@ -76,12 +82,28 @@ Engines with auto-detection expose it as the special value `auto`
   the staging dir to reclaim space. Emotion is steered with at most one of
   `emotion_audio_base64` (a second clip; `emotion_alpha` blends it with the
   speaker's own emotion),   `emotion_vector` (8 components
-  `[happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]` —
-  the same names the capabilities doc advertises in `item_labels`), or
-  `emotion_text` (free text; requires starting the server with
-  `INDEXTTS_USE_QWEN_EMO=1`, else 400). `duration_factor` stretches
-  (>1) / compresses (<1) output length. `seed` is best-effort (the engine's
-  inference API has no seed parameter).
+   `[happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]` —
+   the same names the capabilities doc advertises in `item_labels`), or
+   `emotion_text` (free text; requires starting the server with
+   `INDEXTTS_USE_QWEN_EMO=1`, else 400). `duration_factor` stretches
+   (>1) / compresses (<1) output length. `seed` is best-effort (the engine's
+   inference API has no seed parameter).
+- **LuxTTS** — 48 kHz output (with dots.tts). No `reference_text` field:
+  the engine *always* transcribes the reference clip with Whisper
+  (openai/whisper-base on GPU, whisper-tiny on CPU) and conditions on that —
+  every request pays the ASR cost, and the first request after startup also
+  pays a one-time librosa initialisation (~10 s). No `language` forwarding:
+  the engine's tokenizer auto-detects English and Chinese per segment
+  (other scripts are dropped). `seed` is meaningful (solver initial noise
+  from the PyTorch RNG): bit-identical output on CPU, near-identical on
+  CUDA (non-deterministic GPU kernels). The runtime demands a file path for
+  prompt audio,
+  so the server writes a temp file; the reference is one-shot (no engine
+  prompt cache), so the file is deleted per request. Synthesis is serialized
+  with a lock: `generate_speech()` mutates the shared vocoder's `return_48k`
+  flag in place. `return_smooth` selects the 24 kHz vocoder head
+  (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,
+  different artifact profile; try it if you hear metallic artifacts.
 
 ## Tests (`tests/`)
 

@@ -30,6 +30,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [Faster Qwen3-TTS](impl/server_fasterQwen3TTS.md)
 - [dots.tts](impl/server_dotsTTS.md)
 - [Index-TTS](impl/server_indexTTS.md)
+- [LuxTTS](impl/server_luxTTS.md)
 
 ## Quickstart
 
@@ -100,7 +101,7 @@ for how the endpoint is generated.
 ```
 tts-engine-common/   Shared FastAPI/Pydantic package (no torch): capabilities
                      derivation, core models, /capabilities route, helpers.
-impl/                The six engine servers + their (GPU-free) tests.
+impl/                The seven engine servers + their (GPU-free) tests.
 docs/                Design documents.
 ```
 

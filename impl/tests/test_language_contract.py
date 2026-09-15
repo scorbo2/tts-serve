@@ -20,6 +20,7 @@ import server_chatterbox
 import server_dotsTTS
 import server_fasterQwen3TTS
 import server_indexTTS
+import server_luxTTS
 import server_omnivoice
 import server_qwen3TTS
 from helpers import b64, make_wav_bytes
@@ -32,8 +33,9 @@ SERVERS = [
     (server_fasterQwen3TTS, True),
     (server_dotsTTS, True),
     (server_indexTTS, False),
+    (server_luxTTS, False),
 ]
-SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "faster-qwen3-tts", "dots-tts", "index-tts"]
+SERVER_IDS = ["chatterbox", "omnivoice", "qwen3-tts", "faster-qwen3-tts", "dots-tts", "index-tts", "lux-tts"]
 
 
 @pytest.fixture(params=SERVERS, ids=SERVER_IDS)

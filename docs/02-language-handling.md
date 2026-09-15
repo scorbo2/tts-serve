@@ -33,9 +33,10 @@ TTS engines that expect a language may throw an error if the client-provided
 
 ## Implementation (2026-09)
 
-The four servers in `impl/` now conform to this contract, via shared helpers
-in `tts_engine_common.language` (`DEFAULT_LANGUAGE`, `is_language_code`,
-`normalize_language`, `validate_language_code`):
+All servers in `impl/` conform to this contract, via shared helpers in
+`tts_engine_common.language` (`DEFAULT_LANGUAGE`, `is_language_code`,
+`normalize_language`, `validate_language_code`).  The four servers that
+pre-dated the contract were migrated in September 2026:
 
 | Server | Before | After |
 |---|---|---|
@@ -43,6 +44,17 @@ in `tts_engine_common.language` (`DEFAULT_LANGUAGE`, `is_language_code`,
 | OmniVoice | free-form code **or** name | two-letter code only (validator); null/empty → `en` |
 | Qwen3-TTS | lowercase *names* + `auto` | two-letter codes + `auto`; server maps codes → names via `LANGUAGE_CODE_TO_NAME` |
 | dots.tts | free-form code/name/`none`/`auto_detect` | two-letter codes + `auto`; server maps to uppercase codes / `auto_detect` via `_to_engine_language` |
+
+Servers added to `impl/` after the contract was written were built to it
+from the start (no migration):
+
+- **faster-qwen3-tts** — two-letter codes + `auto`; server maps codes →
+  lowercase *names* via `LANGUAGE_CODE_TO_NAME` (same mapping as Qwen3-TTS).
+- **IndexTTS** — restricted five-code enum (`ar`, `en`, `es`, `ja`, `zh`),
+  no `auto`; any other value 422s at the boundary.
+- **LuxTTS** — the engine has no language parameter at all: the server
+  accepts any two-letter code but does not forward it, and capabilities
+  advertise `languages: null` (the no-support case of this contract).
 
 Decisions taken while implementing:
 

@@ -46,3 +46,6 @@ def setup() -> None:
     os.environ.pop("INDEXTTS_DEVICE", None)      # default: auto-select (stub torch -> 'cpu')
     os.environ.pop("INDEXTTS_USE_BF16", None)
     os.environ.pop("INDEXTTS_USE_QWEN_EMO", None)
+    os.environ["LUX_TTS_DEVICE"] = "cuda"
+    os.environ.pop("LUX_TTS_MODEL", None)        # default: YatharthS/LuxTTS
+    os.environ.pop("LUX_TTS_THREADS", None)      # default: 4
