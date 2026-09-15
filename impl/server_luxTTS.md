@@ -35,14 +35,23 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Now install LuxTTS in this environment. It is a git repo, not a PyPI package:
+Now install LuxTTS in this environment. It is a git repo, not a PyPI
+package, and one of its dependencies (`linacodec`) is **git-only** (not on
+PyPI), so the install takes two steps — and the second one is easy to miss:
 
 ```
 git clone https://github.com/ysharma3501/LuxTTS.git
 cd LuxTTS
+
+# Install dependencies:
 pip install -r requirements.txt
-cd ..
+
+# We also need zipvoice, which isn't installed above:
+pip install . --no-deps
 ```
+
+If you use `uv`, a single `uv pip install .` works instead of the above,
+and installs everything in one step.
 
 Now clone `tts-serve` and install its dependencies:
 

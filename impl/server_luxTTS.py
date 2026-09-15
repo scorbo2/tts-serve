@@ -53,9 +53,16 @@ Configuration (environment variables):
                          Default: 7500
 
 Extra dependencies beyond the LuxTTS repository:
-    # LuxTTS is a git repo, not a PyPI package:
+    # LuxTTS is a git repo, not a PyPI package, and one of its dependencies
+    # (linacodec) is git-only: a plain `pip install ./LuxTTS` fails resolving
+    # it (it is not on PyPI).  Install in two steps:
     git clone https://github.com/ysharma3501/LuxTTS.git
-    pip install ./LuxTTS
+    cd LuxTTS
+    pip install -r requirements.txt  # deps; linacodec resolved from git here
+    pip install . --no-deps          # the zipvoice package itself
+    cd ..
+    # (with uv a single `uv pip install .` works — uv honours the repo's
+    # [tool.uv.sources] git pin for linacodec)
     pip install fastapi uvicorn loguru soundfile
     pip install ../tts-engine-common # in-repo copy; or: pip install -e ../tts-engine-common
 
