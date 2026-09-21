@@ -32,6 +32,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [dots.tts](impl/server_dotsTTS.md)
 - [Index-TTS](impl/server_indexTTS.md)
 - [LuxTTS](impl/server_luxTTS.md)
+- [VoxCPM](impl/server_voxcpm.md)
 
 ## Quickstart
 

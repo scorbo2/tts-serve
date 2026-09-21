@@ -50,3 +50,5 @@ def setup() -> None:
     os.environ["LUX_TTS_DEVICE"] = "cuda"
     os.environ.pop("LUX_TTS_MODEL", None)        # default: YatharthS/LuxTTS
     os.environ.pop("LUX_TTS_THREADS", None)      # default: 4
+    os.environ.pop("VOXCPM_MODEL", None)         # default: openbmb/VoxCPM2
+    os.environ["VOXCPM_DEVICE"] = "cuda"

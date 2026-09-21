@@ -33,6 +33,7 @@ import server_luxTTS  # noqa: E402
 import server_omnivoice  # noqa: E402
 import server_qwen3TTS  # noqa: E402
 import server_qwen3TTS_mlx  # noqa: E402
+import server_voxcpm  # noqa: E402
 
 SNAPSHOTS_DIR = Path(__file__).resolve().parent / "snapshots"
 
@@ -46,6 +47,7 @@ ENGINES = (
     (server_dotsTTS, "dots_capabilities.json"),
     (server_indexTTS, "indextts_capabilities.json"),
     (server_luxTTS, "lux_tts_capabilities.json"),
+    (server_voxcpm, "voxcpm_capabilities.json"),
 )
 
 

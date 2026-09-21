@@ -24,7 +24,8 @@ import server_luxTTS
 import server_omnivoice
 import server_qwen3TTS
 import server_qwen3TTS_mlx
-from helpers import b64, make_wav_bytes
+import server_voxcpm
+from helpers import b64, load_snapshot, make_wav_bytes
 
 # (server module, does the engine offer an 'auto' auto-detection sentinel?)
 SERVERS = [
@@ -36,6 +37,7 @@ SERVERS = [
     (server_dotsTTS, True),
     (server_indexTTS, False),
     (server_luxTTS, False),
+    (server_voxcpm, False),
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -46,6 +48,7 @@ SERVER_IDS = [
     "dots-tts",
     "index-tts",
     "lux-tts",
+    "voxcpm",
 ]
 
 

@@ -22,6 +22,7 @@ More information:
 - [dots.tts](server_dotsTTS.md)
 - [Index-TTS](server_indexTTS.md)
 - [LuxTTS](server_luxTTS.md)
+- [VoxCPM](server_voxcpm.md)
 
 
 ## Running
@@ -122,6 +123,17 @@ forward it, and advertises `languages: null` in capabilities.
   flag in place. `return_smooth` selects the 24 kHz vocoder head
   (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,
   different artifact profile; try it if you hear metallic artifacts.
+
+- **VoxCPM** — 48 kHz output. VoxCPM2 is a 2B parameter tokenizer-free TTS
+  model with three modes: **voice design** (no reference audio; describe the
+  voice in parentheses at the start of `text`), **controllable cloning**
+  (reference audio only), and **ultimate cloning** (reference audio +
+  transcript for audio-continuation cloning). No `reference_text` forwarding:
+  the engine auto-detects language from text content (30 languages internally),
+  so the server accepts any well-formed two-letter `language` code for API
+  consistency but does not forward it. Reference audio is staged to a
+  UUID-named temp file (deleted per-request). `seed` is meaningful — the
+  engine applies it via `torch.manual_seed()` before generation.
 
 ## Tests (`tests/`)
 

@@ -41,5 +41,10 @@ def asarray(obj, dtype=None):
     raise NotImplementedError("numpy stub: asarray() is not available in tests")
 
 
+def zeros(n):
+    """Return a list of n zeros — good enough for len() and iteration."""
+    return [0.0] * n
+
+
 # ``np.random.seed(...)`` in the servers maps onto the stdlib RNG.
 random = _stdlib_random
