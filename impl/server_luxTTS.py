@@ -41,10 +41,11 @@ Configuration (environment variables):
                          ignores this variable entirely and always downloads
                          the default model — that is an upstream LuxTTS bug,
                          not a tts-serve one.
-    LUX_TTS_DEVICE       Device to load the model on.  One of: cuda, mps, cpu.
+    LUX_TTS_DEVICE       Device to load the model on.  One of: cuda, xpu, mps,
+                         cpu.
                          Default: cuda.  Note: if 'cuda' is requested but
-                         unavailable, the engine silently falls back to MPS,
-                         then CPU.
+                         unavailable, the engine falls back to XPU, MPS, then
+                         CPU.
     LUX_TTS_THREADS      CPU ONNX thread count (CPU device only).
                          Default: 4
     LUX_TTS_HOST         Bind host for `python server_luxTTS.py`.
@@ -58,6 +59,7 @@ Extra dependencies beyond the LuxTTS repository:
     # it (it is not on PyPI).  Install in two steps:
     git clone https://github.com/ysharma3501/LuxTTS.git
     cd LuxTTS
+    # Use requirements-xpu.txt instead for Intel GPU inference.
     pip install -r requirements.txt  # deps; linacodec resolved from git here
     pip install . --no-deps          # the zipvoice package itself
     cd ..
@@ -111,7 +113,7 @@ from tts_engine_common import (
 # Configuration
 # ---------------------------------------------------------------------------
 
-SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
+SUPPORTED_DEVICES = ("cuda", "xpu", "mps", "cpu")
 
 MODEL_NAME_OR_PATH = os.getenv("LUX_TTS_MODEL", "YatharthS/LuxTTS")
 DEVICE = os.getenv("LUX_TTS_DEVICE", "cuda")

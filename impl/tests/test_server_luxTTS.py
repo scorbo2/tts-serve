@@ -24,6 +24,16 @@ def client():
 
 
 # ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+def test_xpu_device_is_supported(monkeypatch):
+    monkeypatch.setattr(srv, "DEVICE", "xpu")
+    srv._validate_config()
+
+
+# ---------------------------------------------------------------------------
 # GET /capabilities — snapshot (single source of truth: the Pydantic model)
 # ---------------------------------------------------------------------------
 
