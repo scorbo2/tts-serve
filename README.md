@@ -161,4 +161,5 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Expose `xvec_only` as a faster-qwen3-TTS option (#37)
   - Fix Chatterbox install instructions (#43)
   - Fix Qwen3-TTS MLX emoji-handling bug (#35)
+  - Update new-tts-engine skill a little (#42)
 

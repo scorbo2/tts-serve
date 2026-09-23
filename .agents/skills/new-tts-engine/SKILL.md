@@ -158,6 +158,8 @@ Copy `test_server_chatterbox.py`'s structure:
 5. Add `impl/server_{newEngine}.md` with engine notes and installation/run instructions.
    Follow the pattern of other server-specific markdown files in `impl`.
 6. Docs: add link to engine-specific doc to `impl/README.md` and the root `README.md` Engines list.
+   Update `AGENTS.md` which tracks a list and a count of supported engines - add known quirks
+   for the new engine if relevant. Use the existing engine entries as a guide; keep it brief.
 
 ## Verify
 
