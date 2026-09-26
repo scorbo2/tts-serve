@@ -23,6 +23,7 @@ More information:
 - [Index-TTS](server_indexTTS.md)
 - [LuxTTS](server_luxTTS.md)
 - [VoxCPM](server_voxcpm.md)
+- [Breeze TTS 2](server_breezeBlue.md)
 
 
 ## Running
@@ -50,10 +51,12 @@ format differs map it at their own server — the client never sees it:
 Engines with auto-detection expose it as the special value `auto`
 (Qwen3-TTS, Qwen3-TTS (MLX), faster-qwen3-tts, dots.tts).
 
-**LuxTTS** is the no-support case: the engine has no language parameter at
-all (its tokenizer auto-detects English and Chinese per text segment), so the
-server accepts any well-formed two-letter code for API consistency, does not
-forward it, and advertises `languages: null` in capabilities.
+**LuxTTS** and **Breeze TTS 2** are the no-support case: the engine has no
+language parameter at all (LuxTTS's tokenizer auto-detects English and
+Chinese per text segment; Breeze is bilingual and auto-detects from the
+input text), so the server accepts any well-formed two-letter code for API
+consistency, does not forward it, and advertises `languages: null` in
+capabilities.
 
 ## Engine-specific notes
 
@@ -141,6 +144,24 @@ forward it, and advertises `languages: null` in capabilities.
   request. Synthesis is serialized with a lock: KV caches are mutated in place,
   `torch.compile`d functions are not re-entrant, and `@torch.inference_mode()`
   contexts are thread-affine.
+- **Breeze TTS 2** — CUDA-only (the streaming runtime hard-rejects non-CUDA
+  devices). Voice clone and voice direction only — the engine's voice-design
+  mode is deliberately not exposed (the client does not support it), so
+  `audio_base64` and `reference_text` (the exact transcript) are both
+  **required**. An optional `instruction` switches to voice direction
+  (same speaker, steered delivery); `cfg_scale` (default 1.0, README
+  recommends 4) strengthens instruction-following (a non-default value
+  requires `instruction` — 422 without it, since the CFG branch only
+  exists in voice-direction mode). No `language` forwarding:
+  the engine auto-detects English/Chinese from text, so capabilities
+  advertise `languages: null`. `seed` is meaningful (near-exact on CUDA —
+  non-deterministic kernels). The checkpoint must be a *local directory*
+  (the bundled `audio_tokenizer/` subdirectory is read from disk); the
+  runtime demands a file path for reference audio and re-encodes it per
+  request, so the temp file is deleted per request. Synthesis is serialized
+  with a lock (shared KV/codec state; the engine's own API is single-request).
+  `BREEZEBLUE_FAST_ALL=1` enables the CUDA-graph fast path (one-time warmup
+  from the engine repo's `configs/fast.json`, ~14.4 GiB vs ~7.7 GiB eager).
 
 ## Tests (`tests/`)
 
@@ -165,16 +186,18 @@ What is covered:
 - `POST /synthesize` reference-audio pre-flight: `400` on undecodable audio
   and clips shorter than the engine's minimum (the stub `soundfile.info()`
   parses real WAV headers via the stdlib `wave` module).
-- `POST /synthesize` synthesis edge cases (Qwen3-TTS MLX): 500 with a clear
-  detail when the model generator yields no chunks (stubbed runtime,
-  empty generator).
-- faster-qwen3-tts only: the `/synthesize` success path with a fake model —
-  pins what the server forwards to the engine (the `xvec_only` mode flag and
-  transcript handling); real audio generation is still out of scope.
+- `POST /synthesize` synthesis edge cases (Qwen3-TTS MLX, Breeze TTS 2):
+  500 with a clear detail when the model generator yields no chunks
+  (stubbed runtime, empty generator).
+- The `/synthesize` success path with a fake model — pins what the server
+  forwards to the engine: faster-qwen3-tts (the `xvec_only` mode flag and
+  transcript handling) and Breeze TTS 2 (request dict, template selection,
+  guidance kwargs, seed/request-id forwarding); real audio generation is
+  still out of scope.
 
 What is *not* covered: actual synthesis (needs a real model + GPU).  The
 `/synthesize` success path is exercised only where a test installs a fake
-model (currently faster-qwen3-tts).
+model (faster-qwen3-tts and Breeze TTS 2).
 
 ### Snapshots
 
