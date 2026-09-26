@@ -33,6 +33,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [Index-TTS](impl/server_indexTTS.md)
 - [LuxTTS](impl/server_luxTTS.md)
 - [VoxCPM](impl/server_voxcpm.md)
+- [Breeze TTS 2](impl/server_breezeBlue.md)
 
 ## Quickstart
 
@@ -103,7 +104,7 @@ for how the endpoint is generated.
 ```
 tts-engine-common/   Shared FastAPI/Pydantic package (no torch): capabilities
                      derivation, core models, /capabilities route, helpers.
-impl/                The seven engine servers + their (GPU-free) tests.
+impl/                The engine servers + their (GPU-free) tests.
 docs/                Design documents.
 ```
 
@@ -162,4 +163,6 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Fix Chatterbox install instructions (#43)
   - Fix Qwen3-TTS MLX emoji-handling bug (#35)
   - Update new-tts-engine skill a little (#42)
+- **Work in progress, update with date when ready** [v1.4]
+  - Added support for BreezeBlue (#20)
 

@@ -25,6 +25,7 @@ _bootstrap.setup()
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import server_breezeBlue  # noqa: E402
 import server_chatterbox  # noqa: E402
 import server_dotsTTS  # noqa: E402
 import server_fasterQwen3TTS  # noqa: E402
@@ -48,6 +49,7 @@ ENGINES = (
     (server_indexTTS, "indextts_capabilities.json"),
     (server_luxTTS, "lux_tts_capabilities.json"),
     (server_voxcpm, "voxcpm_capabilities.json"),
+    (server_breezeBlue, "breeze_blue_capabilities.json"),
 )
 
 
