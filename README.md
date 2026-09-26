@@ -162,4 +162,5 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Fix Chatterbox install instructions (#43)
   - Fix Qwen3-TTS MLX emoji-handling bug (#35)
   - Update new-tts-engine skill a little (#42)
-
+- **Work in progress, update with release date when ready** [v1.4]
+  - TODO release notes for v1.4 go here
