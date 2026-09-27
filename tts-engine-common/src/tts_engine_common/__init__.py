@@ -17,6 +17,7 @@ from .models import (
     CoreSynthesisResponse,
     ParamSpec,
     ReferenceAudioSpec,
+    StreamingCapability,
 )
 from .route import add_capabilities_route, capabilities_endpoint
 from .staging import (
@@ -37,6 +38,7 @@ __all__ = [
     "DerivationError",
     "ParamSpec",
     "ReferenceAudioSpec",
+    "StreamingCapability",
     "__version__",
     "add_capabilities_route",
     "build_capabilities",

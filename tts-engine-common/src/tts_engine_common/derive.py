@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from .core import CORE_FIELDS
-from .models import Capabilities, ParamSpec, ReferenceAudioSpec
+from .models import Capabilities, ParamSpec, ReferenceAudioSpec, StreamingCapability
 
 # JSON Schema types we understand. Anything else is a loud error (R1: never
 # silently emit a capabilities document that misdescribes validation).
@@ -161,6 +161,7 @@ def build_capabilities(
     reference_audio: ReferenceAudioSpec | dict[str, Any] | None = None,
     languages: list[str] | None = None,
     overrides: dict[str, dict[str, Any]] | None = None,
+    streaming: StreamingCapability | dict[str, Any] | None = None,
 ) -> Capabilities:
     """Project a Pydantic request schema into the capabilities document.
 
@@ -180,6 +181,11 @@ def build_capabilities(
         Optional ``{field_name: {param_spec_field: value}}`` map for UI sugar
         (step, advanced, group, ...). Keys must be request model fields;
         'name' and 'type' may not be overridden.
+    streaming:
+        Native streaming support (dict or StreamingCapability); None (the
+        default) when the engine does not offer streaming, in which case the
+        ``streaming`` key is omitted entirely from the serialized document
+        (see ``Capabilities._serialize``) rather than emitted as null.
 
     Raises
     ------
@@ -208,6 +214,9 @@ def build_capabilities(
     if isinstance(reference_audio, dict):
         reference_audio = ReferenceAudioSpec(**reference_audio)
 
+    if isinstance(streaming, dict):
+        streaming = StreamingCapability(**streaming)
+
     return Capabilities(
         engine=engine,
         model=model,
@@ -218,4 +227,5 @@ def build_capabilities(
         reference_audio=reference_audio,
         languages=languages,
         parameters=parameters,
+        streaming=streaming,
     )

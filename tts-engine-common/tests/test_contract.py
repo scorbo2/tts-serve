@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from tts_engine_common import CORE_FIELDS, Capabilities, build_capabilities
+from tts_engine_common import CORE_FIELDS, Capabilities, StreamingCapability, build_capabilities
 
 
 class _SampleRequest(BaseModel):
@@ -82,3 +82,50 @@ def test_contract_document_isJsonSerializable() -> None:
     # WHEN dumped with mode="json",
     # THEN json.dumps succeeds (no NaN/inf, no non-JSON types):
     json.dumps(doc.model_dump(mode="json"))
+
+
+def test_contract_streaming_omittedEntirely_whenEngineDoesNotStream() -> None:
+    # GIVEN a document built without a `streaming` capability (every engine
+    # except Qwen3-TTS MLX, as of this feature):
+    doc = _doc()
+
+    # THEN the key is entirely absent from the serialized document -- not
+    # `"streaming": null` -- so an existing non-streaming engine's response
+    # is byte-for-byte unchanged by this feature:
+    assert doc.streaming is None
+    assert "streaming" not in doc.model_dump(mode="json")
+    assert "streaming" not in json.loads(doc.model_dump_json())
+
+
+def test_contract_streaming_present_whenEngineDeclaresIt() -> None:
+    # GIVEN a document built WITH a streaming capability:
+    doc = build_capabilities(
+        _SampleRequest,
+        engine="test-engine",
+        model="test-model",
+        device="mlx",
+        sample_rate=24000,
+        watermarked=False,
+        streaming={
+            "endpoint": "/stream",
+            "format": "pcm_f32le",
+            "sample_rate": 24000,
+            "channels": 1,
+            "voice_conditioning": ["icl", "x_vector"],
+        },
+    )
+
+    # THEN the key is present with exactly the declared shape:
+    assert isinstance(doc.streaming, StreamingCapability)
+    dumped = doc.model_dump(mode="json")
+    assert dumped["streaming"] == {
+        "endpoint": "/stream",
+        "format": "pcm_f32le",
+        "sample_rate": 24000,
+        "channels": 1,
+        "voice_conditioning": ["icl", "x_vector"],
+    }
+
+    # AND the top-level `endpoint` (the existing /synthesize contract) is
+    # untouched by adding a streaming capability:
+    assert doc.endpoint == "/synthesize"
