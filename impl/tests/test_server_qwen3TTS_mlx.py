@@ -584,6 +584,35 @@ def test_stream_body_is_raw_little_endian_float32_pcm_in_order(
     assert response.content[:4] != b"RIFF"
 
 
+def test_stream_complex_unicode_text_reaches_engine_unchanged(
+    client, fake_streaming_runtime
+):
+    # Include both composed and decomposed accents to detect normalization,
+    # plus surrounding whitespace to detect stripping. Explicit escapes make
+    # the variation selector and combining accent unambiguous in the source.
+    text = (
+        "  Buongiorno 👋. Studiamo italiano 🇮🇹. È corretto ✅. Sole ☀\ufe0f.\n"
+        "Famiglia 👨‍👩‍👧‍👦. Uno 👍🏽, due 2️⃣, tre. Prima → ascolta. Caffe\u0300.  "
+    )
+    model = _FakeStreamModel(chunks=[[0.25, -0.5], [0.75]])
+    fake_streaming_runtime.model = model
+    payload = _valid_stream_payload()
+    payload.update(text=text, language="it")
+
+    response = client.post("/stream", json=payload)
+
+    assert response.status_code == 200
+    assert len(model.calls) == 1
+    assert model.calls[0]["text"] == text
+    assert model.calls[0]["stream"] is True
+    assert response.headers["X-Audio-Format"] == "pcm_f32le"
+    assert response.content == struct.pack("<3f", 0.25, -0.5, 0.75)
+    assert model.finalize_calls == 1
+    assert model.reset_calls == 1
+    assert srv._synthesis_lock.acquire(blocking=False)
+    srv._synthesis_lock.release()
+
+
 def test_stream_response_headers_describe_pcm_f32le_mono_24khz(
     client, fake_streaming_runtime
 ):
@@ -1125,6 +1154,54 @@ def test_stream_asgi_startup_failure_never_sends_200(
 
     asyncio.run(exercise())
 
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["😊", "😄", "🍺", "🥪", "🇮🇹", "👨‍👩‍👧‍👦"],
+    ids=["smile", "grin", "beer", "sandwich", "flag", "family-zwj"],
+)
+def test_stream_standalone_emoji_empty_generation_returns_500_and_recovers(
+    fake_streaming_runtime, text
+):
+    # Empty output is explicitly configured, not a prediction of how real
+    # MLX/tokenizers interpret any particular emoji.
+    model = _FakeStreamModel(chunks=[])
+    fake_streaming_runtime.model = model
+    payload = _valid_stream_payload()
+    payload["text"] = text
+    exchange = _StreamExchange(payload)
+
+    async def exercise():
+        await asyncio.wait_for(exchange.run(), 5)
+        # Reaching generate proves valid input passed request validation.
+        assert len(model.calls) == 1
+        assert model.calls[0]["text"] == text
+        assert model.calls[0]["stream"] is True
+        # Inspect every ASGI response start, not just a final client status:
+        # no premature 200 or successful zero-byte stream is permitted.
+        assert exchange.statuses == [500]
+        assert json.loads(b"".join(exchange.bodies)) == {
+            "detail": "The model produced no audio for the supplied text."
+        }
+        assert model.finalize_calls == 1
+        assert model.reset_calls == 1
+        assert srv._synthesis_lock.acquire(blocking=False)
+        srv._synthesis_lock.release()
+
+        # The same valid text may succeed when the engine does emit audio.
+        followup_model = _FakeStreamModel(chunks=[[0.25], [-0.5]])
+        fake_streaming_runtime.model = followup_model
+        followup = _StreamExchange(payload)
+        await asyncio.wait_for(followup.run(), 5)
+        assert followup.statuses == [200]
+        assert followup_model.calls[0]["text"] == text
+        assert b"".join(followup.bodies) == struct.pack("<2f", 0.25, -0.5)
+        assert followup_model.finalize_calls == 1
+        assert followup_model.reset_calls == 1
+        assert not srv._synthesis_lock.locked()
+
+    asyncio.run(exercise())
 
 
 def test_stream_old_asgi_disconnect_cancels_blocked_send(affine_stream):
