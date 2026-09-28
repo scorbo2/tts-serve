@@ -1,0 +1,90 @@
+# Dedicated uv environment for impl/server_omnivoice.py, built from a local
+# OmniVoice git checkout instead of the PyPI package.
+#
+# This is a virtual project (nothing here is installed as a package): it only
+# describes the venv. From the tts-serve repo root:
+#
+#     python3 tools/serve.py omnivoice      # syncs when needed, then starts
+#
+# or by hand:
+#
+#     uv sync --project envs/omnivoice
+#     uv run --project envs/omnivoice python impl/server_omnivoice.py
+#
+# The venv lands in envs/omnivoice/.venv; it and uv.lock are gitignored.
+#
+# OmniVoice is expected to be cloned next to tts-serve:
+#
+#     <parent>/OmniVoice    (https://github.com/k2-fsa/OmniVoice)
+#     <parent>/tts-serve
+#
+# If your checkout lives elsewhere, edit the `omnivoice` path under
+# [tool.uv.sources] below. Both OmniVoice and tts-engine-common are installed
+# editable, so a `git pull` in either takes effect on the next server start.
+#
+# The torch/torchaudio pins and CUDA indexes follow OmniVoice's own
+# pyproject.toml (cu128 wheels, torch 2.8.0), extended for aarch64 Linux
+# (GB10/Grace-Blackwell, Jetson Thor, GH200), which has no cu128 wheels: CUDA
+# builds for that arch start at torch 2.9 on the cu130 index. The pins are
+# overrides rather than constraints on purpose: uv also applies the checkout's
+# own tool.uv.sources, and upstream OmniVoice sends all Linux torch to cu128.
+# The overrides replace that requirement, so an unmodified checkout works on
+# aarch64 too.
+
+[project]
+name = "tts-serve-env-omnivoice"
+version = "0.1.0"
+description = "Environment for the tts-serve OmniVoice server (local OmniVoice checkout)"
+requires-python = ">=3.10"
+dependencies = [
+    "omnivoice",
+    "tts-engine-common",
+    "fastapi",
+    "uvicorn",
+    "loguru",
+    "soundfile",
+    # Requested explicitly so the CUDA index sources below apply; they are not
+    # used for transitive dependencies.
+    "torch",
+    "torchaudio",
+]
+
+[tool.tts-serve]
+# Server started by tools/serve.py (path relative to the repo root).
+server = "impl/server_omnivoice.py"
+# Prefix of the server's <PREFIX>_HOST / <PREFIX>_PORT variables; lets
+# `tools/serve.py omnivoice --host H --port N` set OMNIVOICE_HOST / OMNIVOICE_PORT.
+env-prefix = "OMNIVOICE"
+
+[tool.uv]
+package = false
+override-dependencies = [
+    "torch==2.8.0; platform_machine != 'aarch64'",
+    "torchaudio==2.8.0; platform_machine != 'aarch64'",
+    # Earliest release with aarch64 CUDA wheels.
+    "torch==2.9.1; platform_machine == 'aarch64'",
+    "torchaudio==2.9.1; platform_machine == 'aarch64'",
+]
+
+[tool.uv.sources]
+omnivoice = { path = "../../../OmniVoice", editable = true }
+tts-engine-common = { path = "../../tts-engine-common", editable = true }
+torch = [
+  { index = "pytorch-cuda-sbsa", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cuda", marker = "(sys_platform == 'linux' and platform_machine != 'aarch64') or sys_platform == 'win32'" },
+]
+torchaudio = [
+  { index = "pytorch-cuda-sbsa", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { index = "pytorch-cuda", marker = "(sys_platform == 'linux' and platform_machine != 'aarch64') or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+# Only used where tool.uv.sources asks for it.
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda-sbsa"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

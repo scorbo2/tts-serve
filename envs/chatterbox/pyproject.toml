@@ -1,0 +1,91 @@
+# Dedicated uv environment for impl/server_chatterbox.py, built from a local
+# Chatterbox git checkout instead of the PyPI package.
+#
+# The checkout is required, not just convenient: the server imports
+# MULTILINGUAL_T3_MODELS (the v2/v3 multilingual T3 checkpoints), which only
+# exists in git. PyPI's latest chatterbox-tts (0.1.7) predates the v3 release.
+#
+# This is a virtual project (nothing here is installed as a package): it only
+# describes the venv. From the tts-serve repo root:
+#
+#     python3 tools/serve.py chatterbox      # syncs when needed, then starts
+#
+# or by hand:
+#
+#     uv sync --project envs/chatterbox
+#     uv run --project envs/chatterbox python impl/server_chatterbox.py
+#
+# The venv lands in envs/chatterbox/.venv; it and uv.lock are gitignored.
+#
+# Chatterbox is expected to be cloned next to tts-serve:
+#
+#     <parent>/chatterbox    (https://github.com/resemble-ai/chatterbox)
+#     <parent>/tts-serve
+#
+# If your checkout lives elsewhere, edit the `chatterbox-tts` path under
+# [tool.uv.sources] below. Both Chatterbox and tts-engine-common are installed
+# editable, so a `git pull` in either takes effect on the next server start.
+#
+# Torch: Chatterbox pins torch/torchaudio 2.6.0 and has no index settings of
+# its own. That pin is kept wherever PyPI serves a usable build (x86_64 Linux
+# wheels bundle CUDA 12.4; macOS gets the MPS/CPU build; Windows gets PyPI's
+# CPU build, as with a plain install of the engine). aarch64 Linux (GB10 /
+# Grace-Blackwell, Jetson Thor, GH200) has no CUDA build of 2.6.0, so it is
+# overridden to torch 2.9.1 from the cu130 index, the earliest aarch64 CUDA
+# release. Overrides, not constraints, because the engine's own ==2.6.0 pin
+# has to be replaced, not narrowed. Chatterbox only uses
+# torchaudio.transforms.Resample and compliance.kaldi.fbank, both still in
+# torchaudio 2.9.
+
+[project]
+name = "tts-serve-env-chatterbox"
+version = "0.1.0"
+description = "Environment for the tts-serve Chatterbox server (local Chatterbox checkout)"
+# Chatterbox's torch 2.6.0 pin applies below Python 3.14 only (3.14 needs a
+# newer torch the engine hasn't pinned), so the env stops at 3.13.
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "chatterbox-tts",
+    "tts-engine-common",
+    "fastapi",
+    "uvicorn",
+    "loguru",
+    "soundfile",
+    # Requested explicitly so the CUDA index source below applies; sources
+    # are not used for transitive dependencies.
+    "torch",
+    "torchaudio",
+]
+
+[tool.tts-serve]
+# Server started by tools/serve.py (path relative to the repo root).
+server = "impl/server_chatterbox.py"
+# Prefix of the server's <PREFIX>_HOST / <PREFIX>_PORT variables; lets
+# `tools/serve.py chatterbox --host H --port N` set CHATTERBOX_HOST / CHATTERBOX_PORT.
+env-prefix = "CHATTERBOX"
+
+[tool.uv]
+package = false
+override-dependencies = [
+    "torch==2.6.0; sys_platform != 'linux' or platform_machine != 'aarch64'",
+    "torchaudio==2.6.0; sys_platform != 'linux' or platform_machine != 'aarch64'",
+    "torch==2.9.1; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "torchaudio==2.9.1; sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.uv.sources]
+chatterbox-tts = { path = "../../../chatterbox", editable = true }
+tts-engine-common = { path = "../../tts-engine-common", editable = true }
+torch = [
+  { index = "pytorch-cuda-sbsa", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+torchaudio = [
+  { index = "pytorch-cuda-sbsa", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda-sbsa"
+# CUDA 12.9/13.0 are the only builds shipping aarch64 (SBSA) CUDA wheels.
+url = "https://download.pytorch.org/whl/cu130"
+# Only used where tool.uv.sources asks for it.
+explicit = true

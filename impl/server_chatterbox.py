@@ -31,6 +31,7 @@ Configuration (environment variables):
 
 Install the engine (pinned git commit -- see note below):
     pip install "git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2"
+Or use the uv environment in envs/chatterbox/ (python3 tools/serve.py chatterbox).
 
 Extra dependencies beyond the Chatterbox package:
     pip install fastapi uvicorn loguru soundfile
