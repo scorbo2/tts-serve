@@ -115,10 +115,18 @@ export LUX_TTS_DEVICE=cpu
 python impl/server_luxTTS.py
 ```
 
+For an Intel GPU, install LuxTTS with its XPU requirements, then select `xpu`:
+
+```powershell
+python -m pip install -r requirements-xpu.txt
+$env:LUX_TTS_DEVICE = "xpu"
+python impl/server_luxTTS.py
+```
+
 Note: if `cuda` is requested but unavailable, the engine silently falls back
-to MPS, then CPU. `GET /health` (and `GET /capabilities`) report the
+to XPU, MPS, then CPU. `GET /health` (and `GET /capabilities`) report the
 *configured* device (`LUX_TTS_DEVICE`), not the one actually resolved —
-check the startup log ("CUDA not available, switching to MPS/CPU") to see
+check the startup log ("CUDA not available, switching to XPU/MPS/CPU") to see
 what the server is really running on.
 
 ### CPU thread count
