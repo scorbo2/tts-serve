@@ -27,6 +27,18 @@ bit-identical output, but on CUDA some kernels are non-deterministic, so
 repeated runs can differ by ~1e-7 in sample values.  Do not promise
 bit-exact reproducibility for GPU generations.
 
+`tail_padding` works around the engine clipping very short sentences.  The
+engine fixes the output length *before* generating it, from the reference
+clip's average speaking rate (frames per token) times the text's token
+count, and then speeds that up by an internal, hard-coded factor of 1.3.  A
+one- or two-word sentence gets too little time from that average and ends
+mid-word ("Indeed." came out at 0.32 s).  The server adds a constant
+`tail_padding` seconds to the engine's estimate by passing a slightly lower
+`speed` — the engine's own length formula, solved for the speed that yields
+the padded length — so no engine internals are patched and it works the
+same on every device.  0 reproduces the engine's behaviour exactly; the
+default 0.3 s fixes short sentences and adds only a short pause to long ones.
+
 Model weights are downloaded from HuggingFace (YatharthS/LuxTTS) on first
 start.  Set HF_TOKEN in the environment if your checkpoint needs it.
 
@@ -144,6 +156,16 @@ SEED_MAX = 1000
 # The engine README's explicit lower bound for usable voice cloning.
 MIN_PROMPT_DURATION_S = 3.0
 
+# The engine multiplies every requested speed by this before sizing the
+# output (`speed = speed * 1.3` in both zipvoice's generate() and
+# generate_cpu()).  padded_speed() must undo it to hit an exact padding.
+ENGINE_SPEED_FACTOR = 1.3
+
+# Seconds per engine feature frame (24 kHz features, hop 256).  The loaded
+# engine reports its own value (feature_extractor.frame_shift); this is the
+# fallback if a future engine version stops exposing it.
+DEFAULT_FRAME_SHIFT_S = 256 / 24000
+
 # Sanity valve for the request payload (~80 s of 48 kHz audio).
 MAX_AUDIO_B64_LEN = 10_000_000
 
@@ -254,6 +276,17 @@ class SynthesisRequest(BaseModel):
             "sound louder, ~0.01 recommended; engine default 0.001)."
         ),
     )
+    tail_padding: float = Field(
+        0.3,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Extra seconds added to the engine's estimate of the output "
+            "length.  The engine sizes speech from the reference's average "
+            "speaking rate, which leaves very short sentences too little time "
+            "so they end mid-word.  0 = the engine's own estimate."
+        ),
+    )
 
     @field_validator("text")
     @classmethod
@@ -327,6 +360,7 @@ CAPABILITIES = build_capabilities(
         "speed": {"step": 0.05},
         "prompt_duration": {"step": 1},
         "prompt_rms": {"step": 0.001, "advanced": True},
+        "tail_padding": {"step": 0.05},
     },
 )
 
@@ -381,6 +415,7 @@ class LuxTTSRuntime:
     model: LuxTTS
     sample_rate: int
     device: str
+    frame_shift_s: float = DEFAULT_FRAME_SHIFT_S
 
 
 _runtime: LuxTTSRuntime | None = None
@@ -410,6 +445,9 @@ def _get_runtime() -> LuxTTSRuntime:
             model=model,
             sample_rate=SAMPLE_RATE,
             device=str(model.device),
+            frame_shift_s=float(
+                getattr(model.feature_extractor, "frame_shift", DEFAULT_FRAME_SHIFT_S)
+            ),
         )
         logger.info(
             "Model loaded successfully. Sampling rate: {} Hz, device: {}",
@@ -491,7 +529,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
     logger.info(
         "Synthesizing: seed={}, text_len={}, steps={}, guidance={:.1f}, "
         "t_shift={:.2f}, speed={:.2f}, smooth={}, prompt_dur={:.0f}s, "
-        "prompt_rms={:.3f}, lang={} (not forwarded)",
+        "prompt_rms={:.3f}, tail_padding={:.2f}s, lang={} (not forwarded)",
         seed,
         len(req.text),
         req.num_steps,
@@ -501,6 +539,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         req.return_smooth,
         req.prompt_duration,
         req.prompt_rms,
+        req.tail_padding,
         req.language,
     )
 
@@ -529,6 +568,17 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
                 duration=req.prompt_duration,
                 rms=req.prompt_rms,
             )
+            # tail_padding: counted with the engine's own tokenizer, exactly
+            # as generate_speech() will count them (see padded_speed()).
+            speed = padded_speed(
+                prompt_frames=float(encoded_prompt["prompt_features_lens"][0]),
+                prompt_tokens=len(encoded_prompt["prompt_tokens"][0]),
+                text_tokens=len(
+                    runtime.model.tokenizer.texts_to_token_ids([req.text])[0]
+                ),
+                speed=req.speed,
+                pad_frames=req.tail_padding / runtime.frame_shift_s,
+            )
             # The engine's `language` value is not forwarded: it has no
             # language parameter (docs/02 no-support case).
             wav = runtime.model.generate_speech(
@@ -537,7 +587,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
                 num_steps=req.num_steps,
                 guidance_scale=req.guidance_scale,
                 t_shift=req.t_shift,
-                speed=req.speed,
+                speed=speed,
                 return_smooth=req.return_smooth,
             )
 
@@ -592,6 +642,31 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def padded_speed(
+    prompt_frames: float,
+    prompt_tokens: int,
+    text_tokens: int,
+    speed: float,
+    pad_frames: float,
+) -> float:
+    """Return the ``speed`` to pass so the engine sizes the text part of its
+    output ``pad_frames`` longer than it would at ``speed``.
+
+    The engine's length estimate (zipvoice's ratio duration), with its
+    internal factor f = ENGINE_SPEED_FACTOR applied to the passed speed s:
+
+        text_frames(s) = prompt_frames / prompt_tokens * text_tokens / (s * f)
+
+    Solving text_frames(s') = text_frames(speed) + pad_frames for s' gives
+    the value below.  Degenerate inputs (no padding, empty token lists)
+    return ``speed`` unchanged, so the engine behaves as it always did.
+    """
+    if pad_frames <= 0 or prompt_frames <= 0 or prompt_tokens <= 0 or text_tokens <= 0:
+        return speed
+    rate = prompt_frames / prompt_tokens * text_tokens
+    return rate / (rate / speed + ENGINE_SPEED_FACTOR * pad_frames)
 
 
 def _check_reference_audio(raw_bytes: bytes) -> None:

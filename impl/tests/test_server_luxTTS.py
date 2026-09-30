@@ -242,3 +242,143 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "3" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# tail_padding — extra time on the engine's length estimate (short sentences)
+# ---------------------------------------------------------------------------
+
+
+def test_synthesize_tail_padding_below_range_rejected(client):
+    payload = _valid_payload()
+    payload["tail_padding"] = -0.1
+    assert _post(client, payload).status_code == 422
+
+
+def test_synthesize_tail_padding_above_range_rejected(client):
+    payload = _valid_payload()
+    payload["tail_padding"] = 2.5
+    assert _post(client, payload).status_code == 422
+
+
+def _engine_text_frames(prompt_frames, prompt_tokens, text_tokens, passed_speed):
+    """The engine's own length estimate for the text part (zipvoice ratio
+    duration), including its internal speed factor."""
+    return prompt_frames / prompt_tokens * text_tokens / (passed_speed * srv.ENGINE_SPEED_FACTOR)
+
+
+@pytest.mark.parametrize("text_tokens", [3, 12, 150])
+@pytest.mark.parametrize("speed", [0.8, 1.0, 1.5])
+def test_padded_speed_adds_exactly_the_padding(text_tokens, speed):
+    prompt_frames, prompt_tokens, pad = 940.0, 110, 28.0
+    padded = srv.padded_speed(prompt_frames, prompt_tokens, text_tokens, speed, pad)
+    before = _engine_text_frames(prompt_frames, prompt_tokens, text_tokens, speed)
+    after = _engine_text_frames(prompt_frames, prompt_tokens, text_tokens, padded)
+    assert after == pytest.approx(before + pad)
+    assert padded < speed
+
+
+def test_padded_speed_matters_most_for_short_texts():
+    # The same padding is a large share of a one-word sentence and a small
+    # share of a long one, so short texts are slowed down far more.
+    short = srv.padded_speed(940.0, 110, 3, 1.0, 28.0)
+    long = srv.padded_speed(940.0, 110, 150, 1.0, 28.0)
+    assert short < long < 1.0
+    assert long > 0.9
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (940.0, 110, 12, 1.0, 0.0),  # no padding requested
+        (940.0, 110, 0, 1.0, 28.0),  # empty text tokens
+        (940.0, 0, 12, 1.0, 28.0),  # empty prompt tokens
+        (0.0, 110, 12, 1.0, 28.0),  # empty prompt features
+    ],
+)
+def test_padded_speed_degenerate_inputs_keep_speed(args):
+    assert srv.padded_speed(*args) == args[3]
+
+
+class _FakeWav:
+    """Stands in for the engine's (1, N) tensor: detach().cpu().numpy().reshape()."""
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self
+
+    def reshape(self, *_shape):
+        return [0.0] * (srv.SAMPLE_RATE // 10)  # ~0.1 s of silence
+
+
+class _FakeLuxModel:
+    """Engine-shaped encode_prompt()/tokenizer; records generate_speech() kwargs."""
+
+    PROMPT_FRAMES = 940.0
+    PROMPT_TOKENS = 110
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        # One token per character: enough to make token counts predictable.
+        self.tokenizer = types.SimpleNamespace(
+            texts_to_token_ids=lambda texts: [[0] * len(texts[0])]
+        )
+
+    def encode_prompt(self, _path, duration, rms):
+        return {
+            "prompt_tokens": [[0] * self.PROMPT_TOKENS],
+            "prompt_features_lens": [self.PROMPT_FRAMES],
+            "prompt_features": None,
+            "prompt_rms": rms,
+        }
+
+    def generate_speech(self, _text, _encode_dict, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeWav()
+
+
+@pytest.fixture
+def fake_model(monkeypatch):
+    """Install a recording model and a no-op WAV encoder (the stub
+    numpy/soundfile refuse clip()/write() by design)."""
+    model = _FakeLuxModel()
+    monkeypatch.setattr(
+        srv,
+        "_runtime",
+        srv.LuxTTSRuntime(model=model, sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE),
+    )
+    monkeypatch.setattr(srv, "_numpy_to_wav_bytes", lambda arr, sr: b"RIFFfake")
+    return model
+
+
+def test_synthesize_forwards_padded_speed(client, fake_model):
+    payload = _valid_payload()
+    payload.update(text="Indeed.", speed=1.0, tail_padding=0.3)
+    assert _post(client, payload).status_code == 200
+    expected = srv.padded_speed(
+        _FakeLuxModel.PROMPT_FRAMES,
+        _FakeLuxModel.PROMPT_TOKENS,
+        len("Indeed."),
+        1.0,
+        0.3 / srv.DEFAULT_FRAME_SHIFT_S,
+    )
+    assert fake_model.calls[-1]["speed"] == pytest.approx(expected)
+    assert fake_model.calls[-1]["speed"] < 1.0
+
+
+def test_synthesize_zero_tail_padding_forwards_speed_unchanged(client, fake_model):
+    payload = _valid_payload()
+    payload.update(speed=1.2, tail_padding=0.0)
+    assert _post(client, payload).status_code == 200
+    assert fake_model.calls[-1]["speed"] == 1.2
+
+
+def test_synthesize_tail_padding_defaults_on(client, fake_model):
+    payload = _valid_payload()  # no tail_padding: the 0.3 s default applies
+    assert _post(client, payload).status_code == 200
+    assert fake_model.calls[-1]["speed"] < 1.0

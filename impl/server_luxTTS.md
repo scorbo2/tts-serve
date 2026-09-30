@@ -23,6 +23,13 @@ Quick stats:
     fails with HTTP 500 rather than a friendly 400.
   - the first request after startup also pays a one-time librosa
     initialisation (~10 s).
+  - `tail_padding` (default 0.3 s) stops very short sentences from being cut
+    off. The engine fixes the output length before generating it, from the
+    reference's average speaking rate (and an internal 1.3x speed-up), so a
+    one- or two-word sentence gets too little time and ends mid-word. The
+    server adds `tail_padding` seconds to that estimate by passing a slightly
+    lower `speed`; long sentences only gain a short pause. `0` gives the
+    engine's original behaviour.
 
 ## Installation
 

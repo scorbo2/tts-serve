@@ -126,6 +126,13 @@ capabilities.
   flag in place. `return_smooth` selects the 24 kHz vocoder head
   (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,
   different artifact profile; try it if you hear metallic artifacts.
+  `tail_padding` (seconds, default 0.3) adds constant time to the engine's
+  output-length estimate, which is sized from the reference's average
+  speaking rate (times an internal 1.3 speed-up) and leaves one- or two-word
+  sentences too short — they end mid-word. The server applies it by solving
+  the engine's length formula for a lower `speed` (`padded_speed()`), so no
+  engine internals are patched and CPU and GPU behave the same; `0` is the
+  engine's own estimate.
 - **VoxCPM** — 48 kHz output (with dots.tts and LuxTTS). Supports three
   modes: voice design (no reference audio -- a `(control instruction)` prefix
   in `text` steers the generated voice), controllable cloning (reference audio
