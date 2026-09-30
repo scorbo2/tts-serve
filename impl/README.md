@@ -112,16 +112,19 @@ capabilities.
    inference API has no seed parameter).
 - **LuxTTS** — 48 kHz output (with dots.tts). No `reference_text` field:
   the engine *always* transcribes the reference clip with Whisper
-  (openai/whisper-base on GPU, whisper-tiny on CPU) and conditions on that —
-  every request pays the ASR cost, and the first request after startup also
-  pays a one-time librosa initialisation (~10 s). No `language` forwarding:
+  (openai/whisper-base on GPU, whisper-tiny on CPU) and conditions on that.
+  The server caches the encoded reference (`encode_prompt()`) in an LRU keyed
+  by the clip's SHA-256 plus `prompt_duration` and `prompt_rms`
+  (`LUX_TTS_PROMPT_CACHE_SIZE`, default 8, 0 disables), so only the first
+  request with a given clip pays the ASR cost; the first request after
+  startup also pays a one-time librosa initialisation (~10 s). No `language` forwarding:
   the engine's tokenizer auto-detects English and Chinese per segment
   (other scripts are dropped). `seed` is meaningful (solver initial noise
   from the PyTorch RNG): bit-identical output on CPU, near-identical on
   CUDA (non-deterministic GPU kernels). The runtime demands a file path for
   prompt audio,
-  so the server writes a temp file; the reference is one-shot (no engine
-  prompt cache), so the file is deleted per request. Synthesis is serialized
+  so on a cache miss the server writes a UUID temp file and deletes it after
+  the request (the cache is keyed by content, not by that path). Synthesis is serialized
   with a lock: `generate_speech()` mutates the shared vocoder's `return_48k`
   flag in place. `return_smooth` selects the 24 kHz vocoder head
   (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,

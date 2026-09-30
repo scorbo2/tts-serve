@@ -3,7 +3,8 @@
 These exercise the HTTP surface that does NOT require a loaded model:
 /capabilities (snapshot), /health, the landing page, request-body validation
 (422s), and the reference-audio pre-flight checks (400s).  Synthesis itself
-needs a real model + GPU, so it is intentionally out of scope here.
+needs a real model + GPU, so it is intentionally out of scope here; the
+prompt cache around it is exercised with a recording fake model.
 """
 
 import types
@@ -242,3 +243,150 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "3" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Prompt cache — the encoded reference is reused across requests
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_cache_key_depends_on_clip_duration_and_rms():
+    clip, other = make_wav_bytes(3.0), make_wav_bytes(3.0, freq=220.0)
+    base = srv.PromptCache.key(clip, 5.0, 0.001)
+    assert srv.PromptCache.key(clip, 5.0, 0.001) == base
+    assert srv.PromptCache.key(other, 5.0, 0.001) != base
+    assert srv.PromptCache.key(clip, 10.0, 0.001) != base
+    assert srv.PromptCache.key(clip, 5.0, 0.01) != base
+
+
+def test_prompt_cache_evicts_least_recently_used():
+    cache = srv.PromptCache(2)
+    cache.put("a", {"n": 1})
+    cache.put("b", {"n": 2})
+    assert cache.get("a") == {"n": 1}  # touching "a" makes "b" the oldest
+    cache.put("c", {"n": 3})
+    assert cache.get("b") is None
+    assert cache.get("a") == {"n": 1}
+    assert cache.get("c") == {"n": 3}
+    assert len(cache) == 2
+
+
+def test_prompt_cache_size_zero_disables_caching():
+    cache = srv.PromptCache(0)
+    cache.put("a", {"n": 1})
+    assert cache.get("a") is None
+    assert len(cache) == 0
+
+
+def test_prompt_cache_size_env_default_is_eight():
+    assert srv.PROMPT_CACHE_SIZE == 8
+
+
+class _FakeWav:
+    """Stands in for the engine's (1, N) tensor: detach().cpu().numpy().reshape()."""
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self
+
+    def reshape(self, *_shape):
+        return [0.0] * (srv.SAMPLE_RATE // 10)  # ~0.1 s of silence
+
+
+class _FakeLuxModel:
+    """Counts encode_prompt() calls; hands generate_speech() back a silent clip."""
+
+    def __init__(self):
+        self.encode_calls: list[dict] = []
+        self.generated_with: list[dict] = []
+
+    def encode_prompt(self, path, duration, rms):
+        self.encode_calls.append({"path": path, "duration": duration, "rms": rms})
+        return {"prompt_tokens": [[0]], "prompt_features_lens": [1.0],
+                "prompt_features": None, "prompt_rms": rms, "id": len(self.encode_calls)}
+
+    def generate_speech(self, _text, encode_dict, **_kwargs):
+        self.generated_with.append(encode_dict)
+        return _FakeWav()
+
+
+@pytest.fixture
+def fake_model(monkeypatch):
+    """A recording model, a fresh cache per test, and a no-op WAV encoder (the
+    stub numpy/soundfile refuse clip()/write() by design)."""
+    model = _FakeLuxModel()
+    monkeypatch.setattr(
+        srv, "_runtime",
+        types.SimpleNamespace(model=model, sample_rate=srv.SAMPLE_RATE, device=srv.DEVICE),
+    )
+    monkeypatch.setattr(srv, "_prompt_cache", srv.PromptCache(8))
+    monkeypatch.setattr(srv, "_numpy_to_wav_bytes", lambda arr, sr: b"RIFFfake")
+    return model
+
+
+def test_same_reference_is_encoded_once(client, fake_model):
+    payload = _valid_payload()
+    for text in ("First sentence.", "Second sentence.", "Third."):
+        payload["text"] = text
+        assert _post(client, payload).status_code == 200
+    assert len(fake_model.encode_calls) == 1
+    # Every generation reused that one encoding.
+    assert [e["id"] for e in fake_model.generated_with] == [1, 1, 1]
+
+
+def test_different_reference_is_encoded_again(client, fake_model):
+    payload = _valid_payload()
+    assert _post(client, payload).status_code == 200
+    payload["audio_base64"] = b64(make_wav_bytes(3.0, freq=220.0))
+    assert _post(client, payload).status_code == 200
+    assert len(fake_model.encode_calls) == 2
+
+
+@pytest.mark.parametrize("field,value", [("prompt_duration", 10.0), ("prompt_rms", 0.01)])
+def test_changed_prompt_setting_is_encoded_again(client, fake_model, field, value):
+    payload = _valid_payload()
+    assert _post(client, payload).status_code == 200
+    payload[field] = value
+    assert _post(client, payload).status_code == 200
+    assert len(fake_model.encode_calls) == 2
+    assert fake_model.encode_calls[-1]["duration" if field == "prompt_duration" else "rms"] == value
+
+
+def test_cache_hit_writes_no_temp_file(client, fake_model, monkeypatch):
+    written = []
+    real_write = srv.write_temp_audio
+    monkeypatch.setattr(
+        srv, "write_temp_audio", lambda raw, d: written.append(1) or real_write(raw, d)
+    )
+    payload = _valid_payload()
+    for _ in range(3):
+        assert _post(client, payload).status_code == 200
+    assert len(written) == 1
+
+
+def test_cache_disabled_encodes_every_request(client, fake_model, monkeypatch):
+    monkeypatch.setattr(srv, "_prompt_cache", srv.PromptCache(0))
+    payload = _valid_payload()
+    for _ in range(3):
+        assert _post(client, payload).status_code == 200
+    assert len(fake_model.encode_calls) == 3
+
+
+def test_seed_is_applied_after_encoding(client, fake_model, monkeypatch):
+    # Seeding after encode_prompt() keeps cache hits and misses identical for
+    # the same seed: the seed only governs the solver's noise.
+    order = []
+    real_encode = fake_model.encode_prompt
+    monkeypatch.setattr(fake_model, "encode_prompt",
+                        lambda *a, **k: order.append("encode") or real_encode(*a, **k))
+    monkeypatch.setattr(srv, "seed_everything", lambda seed: order.append("seed"))
+    payload = _valid_payload()
+    payload["seed"] = 42
+    assert _post(client, payload).status_code == 200
+    assert _post(client, payload).status_code == 200
+    assert order == ["encode", "seed", "seed"]

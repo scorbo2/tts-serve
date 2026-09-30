@@ -16,7 +16,7 @@
     ],
     "min_duration_s": 3.0,
     "max_duration_s": null,
-    "note": "The engine transcribes the reference clip with Whisper (openai/whisper-base on GPU, whisper-tiny on CPU) \u2014 there is no transcript field, and every request pays the ASR cost.  Only the first prompt_duration seconds are used; roughly 10 s of clean speech clones best.  The first request after startup also pays a one-time librosa initialisation (~10 s)."
+    "note": "The engine transcribes the reference clip with Whisper (openai/whisper-base on GPU, whisper-tiny on CPU) \u2014 there is no transcript field.  The server caches the result per clip (and prompt_duration/prompt_rms), so only the first request with a given clip pays the ASR cost.  Only the first prompt_duration seconds are used; roughly 10 s of clean speech clones best.  The first request after startup also pays a one-time librosa initialisation (~10 s)."
   },
   "languages": null,
   "parameters": [

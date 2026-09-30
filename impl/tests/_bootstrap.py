@@ -50,6 +50,7 @@ def setup() -> None:
     os.environ["LUX_TTS_DEVICE"] = "cuda"
     os.environ.pop("LUX_TTS_MODEL", None)        # default: YatharthS/LuxTTS
     os.environ.pop("LUX_TTS_THREADS", None)      # default: 4
+    os.environ.pop("LUX_TTS_PROMPT_CACHE_SIZE", None)  # default: 8
     os.environ["VOXCPM_DEVICE"] = "cuda"          # mirror server's documented default
     os.environ.pop("VOXCPM_MODEL", None)         # default: openbmb/VoxCPM2
     # no VOXCPM_MPS_DTYPE needed (default float32 is fine for deterministic snapshots)

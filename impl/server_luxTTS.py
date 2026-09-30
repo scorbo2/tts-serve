@@ -11,8 +11,9 @@ Unlike most tts-serve engines, LuxTTS has no transcript-of-the-reference
 field: the engine *always* transcribes the reference clip with Whisper
 (openai/whisper-base on GPU, whisper-tiny on CPU) and conditions on that
 transcription plus the audio features.  The `reference_text` core field is
-deliberately absent from this server, and every request pays the ASR
-inference cost (the ASR model itself loads once at startup).
+deliberately absent from this server.  The ASR model loads once at startup,
+and its per-clip cost is paid once per reference clip thanks to the prompt
+cache described below.
 
 Likewise there is no language parameter in the engine API: its tokenizer
 auto-detects English and Chinese per text segment (other scripts are
@@ -26,6 +27,16 @@ on CPU the whole graph is deterministic and identical inputs + seed yield
 bit-identical output, but on CUDA some kernels are non-deterministic, so
 repeated runs can differ by ~1e-7 in sample values.  Do not promise
 bit-exact reproducibility for GPU generations.
+
+The encoded reference prompt (Whisper transcript + audio features, from
+`encode_prompt()`) is cached per clip.  Sentence-streaming clients send the
+same voice clip with every sentence, and re-encoding it took ~0.6 s per
+request on an RX 7800 XT — about as long as generating the speech itself at
+the default 4 steps.  The cache key is the clip's SHA-256 plus
+`prompt_duration` and `prompt_rms` (both change the encoding).  The engine
+only reads the encoded prompt (neither generate path mutates it), so a cache
+hit gives exactly the same output as re-encoding.  LUX_TTS_PROMPT_CACHE_SIZE
+sets how many clips are kept, least recently used evicted first.
 
 Model weights are downloaded from HuggingFace (YatharthS/LuxTTS) on first
 start.  Set HF_TOKEN in the environment if your checkpoint needs it.
@@ -47,6 +58,11 @@ Configuration (environment variables):
                          then CPU.
     LUX_TTS_THREADS      CPU ONNX thread count (CPU device only).
                          Default: 4
+    LUX_TTS_PROMPT_CACHE_SIZE
+                         How many encoded reference clips to keep in memory
+                         (least recently used evicted).  0 disables caching,
+                         so every request re-encodes its reference.
+                         Default: 8
     LUX_TTS_HOST         Bind host for `python server_luxTTS.py`.
                          Default: 0.0.0.0
     LUX_TTS_PORT         Bind port for `python server_luxTTS.py`.
@@ -74,12 +90,14 @@ Usage:
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import os
 import random
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
@@ -116,6 +134,7 @@ SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
 MODEL_NAME_OR_PATH = os.getenv("LUX_TTS_MODEL", "YatharthS/LuxTTS")
 DEVICE = os.getenv("LUX_TTS_DEVICE", "cuda")
 THREADS = int(os.getenv("LUX_TTS_THREADS", "4"))
+PROMPT_CACHE_SIZE = int(os.getenv("LUX_TTS_PROMPT_CACHE_SIZE", "8"))
 
 
 def _validate_config() -> None:
@@ -127,6 +146,10 @@ def _validate_config() -> None:
     if THREADS < 1:
         raise ValueError(
             f"LUX_TTS_THREADS must be a positive integer, got {THREADS}"
+        )
+    if PROMPT_CACHE_SIZE < 0:
+        raise ValueError(
+            f"LUX_TTS_PROMPT_CACHE_SIZE must be 0 or more, got {PROMPT_CACHE_SIZE}"
         )
 
 
@@ -313,7 +336,9 @@ CAPABILITIES = build_capabilities(
         "note": (
             "The engine transcribes the reference clip with Whisper "
             "(openai/whisper-base on GPU, whisper-tiny on CPU) — there is "
-            "no transcript field, and every request pays the ASR cost.  "
+            "no transcript field.  The server caches the result per clip "
+            "(and prompt_duration/prompt_rms), so only the first request "
+            "with a given clip pays the ASR cost.  "
             "Only the first prompt_duration seconds are used; roughly 10 s "
             "of clean speech clones best.  The first request after startup "
             "also pays a one-time librosa initialisation (~10 s)."
@@ -341,6 +366,7 @@ async def lifespan(_app: FastAPI):
     _get_runtime()
     yield
     global _runtime
+    _prompt_cache.clear()  # cached prompts hold device tensors
     if _runtime is not None:
         del _runtime.model
         _runtime = None
@@ -390,6 +416,47 @@ _runtime: LuxTTSRuntime | None = None
 # per-call state — concurrent requests would stomp on each other.
 # Serialize synthesis; single-device throughput is the bottleneck anyway.
 _synthesis_lock = threading.Lock()
+
+
+class PromptCache:
+    """Least-recently-used cache of ``encode_prompt()`` results.
+
+    Keyed by (SHA-256 of the reference clip, prompt_duration, prompt_rms):
+    the same clip encoded with a different duration or target RMS is a
+    different prompt.  Not thread-safe on its own — use it only while
+    holding ``_synthesis_lock``.  A ``max_entries`` of 0 disables caching.
+    """
+
+    def __init__(self, max_entries: int):
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple, dict] = OrderedDict()
+
+    @staticmethod
+    def key(raw_audio: bytes, duration: float, rms: float) -> tuple:
+        return (hashlib.sha256(raw_audio).hexdigest(), float(duration), float(rms))
+
+    def get(self, key: tuple) -> dict | None:
+        encoded = self._entries.get(key)
+        if encoded is not None:
+            self._entries.move_to_end(key)
+        return encoded
+
+    def put(self, key: tuple, encoded: dict) -> None:
+        if self.max_entries <= 0:
+            return
+        self._entries[key] = encoded
+        self._entries.move_to_end(key)
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+_prompt_cache = PromptCache(PROMPT_CACHE_SIZE)
 
 
 def _get_runtime() -> LuxTTSRuntime:
@@ -512,23 +579,37 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
     _check_reference_audio(raw_audio)
 
-    # The engine loads prompt audio from a file path (librosa).  One-shot
-    # engine — no path-keyed cache — so a UUID temp file cleaned up per
-    # request is fine (no content-hashing needed).
-    prompt_audio_path = write_temp_audio(raw_audio, _TEMP_AUDIO_DIR)
+    cache_key = PromptCache.key(raw_audio, req.prompt_duration, req.prompt_rms)
+    # Written only on a cache miss: the engine loads prompt audio from a file
+    # path (librosa).  The cache is keyed by content, not by this path, so a
+    # UUID temp file cleaned up per request is still enough.
+    prompt_audio_path = None
 
     try:
-        # Time the actual synthesis call (ASR transcription included — it
-        # is part of the engine's per-request cost, not setup).
+        # Time the actual synthesis call (on a cache miss this includes the
+        # ASR transcription — part of the request's cost, not setup).
         t0 = time.perf_counter()
 
         with _synthesis_lock:
+            encoded_prompt = _prompt_cache.get(cache_key)
+            if encoded_prompt is None:
+                prompt_audio_path = write_temp_audio(raw_audio, _TEMP_AUDIO_DIR)
+                encoded_prompt = runtime.model.encode_prompt(
+                    prompt_audio_path,
+                    duration=req.prompt_duration,
+                    rms=req.prompt_rms,
+                )
+                _prompt_cache.put(cache_key, encoded_prompt)
+                logger.info(
+                    "Reference encoded (prompt cache miss; {} clip(s) cached)",
+                    len(_prompt_cache),
+                )
+            else:
+                logger.info("Reference taken from the prompt cache (not re-encoded)")
+            # Seed after encoding, right before generation: the seed then
+            # governs only the solver's noise, so a cache hit and a miss give
+            # the same audio for the same seed.
             seed_everything(seed)
-            encoded_prompt = runtime.model.encode_prompt(
-                prompt_audio_path,
-                duration=req.prompt_duration,
-                rms=req.prompt_rms,
-            )
             # The engine's `language` value is not forwarded: it has no
             # language parameter (docs/02 no-support case).
             wav = runtime.model.generate_speech(
@@ -574,8 +655,9 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
-        # Clean up the temporary reference audio file.
-        cleanup_temp(prompt_audio_path)
+        # Clean up the temporary reference audio file (cache misses only).
+        if prompt_audio_path is not None:
+            cleanup_temp(prompt_audio_path)
 
 
 # ---------------------------------------------------------------------------

@@ -7,8 +7,12 @@ Quick stats:
 - **Notes**:
   - reference audio transcript **not needed** — the engine always transcribes
     the reference clip itself with Whisper (openai/whisper-base on GPU,
-    whisper-tiny on CPU), so there is no `reference_text` field and every
-    request pays the ASR cost.
+    whisper-tiny on CPU), so there is no `reference_text` field. The server
+    caches the encoded reference per clip, so only the first request with a
+    given clip (and `prompt_duration`/`prompt_rms`) pays the ASR cost; later
+    ones reuse it (~0.6 s saved per request on an RX 7800 XT). Set
+    `LUX_TTS_PROMPT_CACHE_SIZE` (default 8 clips) to change how many are
+    kept, or `0` to disable the cache.
   - the engine has **no language parameter**: its tokenizer auto-detects
     English and Chinese per text segment (other scripts are dropped). The
     API accepts any two-letter `language` code for consistency but does not
