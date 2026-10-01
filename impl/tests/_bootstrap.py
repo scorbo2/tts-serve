@@ -53,3 +53,6 @@ def setup() -> None:
     os.environ["VOXCPM_DEVICE"] = "cuda"          # mirror server's documented default
     os.environ.pop("VOXCPM_MODEL", None)         # default: openbmb/VoxCPM2
     # no VOXCPM_MPS_DTYPE needed (default float32 is fine for deterministic snapshots)
+    os.environ["BREEZEBLUE_DEVICE"] = "cuda"
+    os.environ.pop("BREEZEBLUE_MODEL", None)     # default: BreezeBlue/breeze-tts-2
+    os.environ.pop("BREEZEBLUE_FAST_ALL", None)  # default: 0 (eager)

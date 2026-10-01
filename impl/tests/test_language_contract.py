@@ -16,6 +16,7 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
+import server_breezeBlue
 import server_chatterbox
 import server_dotsTTS
 import server_fasterQwen3TTS
@@ -38,6 +39,7 @@ SERVERS = [
     (server_indexTTS, False),
     (server_luxTTS, False),
     (server_voxcpm, False),
+    (server_breezeBlue, False),
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -49,6 +51,7 @@ SERVER_IDS = [
     "index-tts",
     "lux-tts",
     "voxcpm",
+    "breeze-blue",
 ]
 
 
@@ -84,8 +87,10 @@ def _payload(module):
     payload = {"text": "Hello there", "audio_base64": b64(make_wav_bytes(3.0))}
     # qwen3-tts-mlx exposes ICL (advanced) mode only, so its reference
     # transcript is a hard requirement rather than an optional refinement.
+    # BreezeBlue is the same: both of its supported modes (voice clone,
+    # voice direction) condition on the clip and its exact transcript.
     # (faster-qwen3-tts defaults to x-vector mode, which ignores it.)
-    if module is server_qwen3TTS_mlx:
+    if module in (server_qwen3TTS_mlx, server_breezeBlue):
         payload["reference_text"] = "A short, exact transcript of the reference clip."
     return payload
 
