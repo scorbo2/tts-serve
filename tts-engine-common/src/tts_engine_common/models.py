@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from .core import SCHEMA_VERSION
 
@@ -100,6 +100,30 @@ class ReferenceAudioSpec(BaseModel):
     note: str = Field("", description="Human-readable guidance (truncation, quality, etc.).")
 
 
+class StreamingCapability(BaseModel):
+    """Native streaming synthesis support, advertised only when an engine offers it.
+
+    Presence-based by design: an engine that supports streaming includes this
+    object in its /capabilities document; an engine that does not simply
+    omits the ``streaming`` key entirely (see ``Capabilities._serialize``) —
+    never ``streaming: null`` or a boolean flag. The object's own fields
+    describe the fixed technical shape of the stream, not a full derived
+    parameter list (that would require a second request-model projection,
+    which is out of scope for a first streaming implementation).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(..., min_length=1, description="POST path for streaming synthesis requests, e.g. '/stream'.")
+    format: str = Field(..., min_length=1, description="Wire format identifier for the streamed audio, e.g. 'pcm_f32le'.")
+    sample_rate: int = Field(..., gt=0, description="Streamed audio sample rate in Hz.")
+    channels: int = Field(..., gt=0, description="Number of audio channels in the stream (1 = mono).")
+    voice_conditioning: list[str] = Field(
+        default_factory=list,
+        description="Voice-conditioning modes the streaming endpoint supports, e.g. ['icl', 'x_vector'].",
+    )
+
+
 class Capabilities(BaseModel):
     """The GET /capabilities document for one engine server."""
 
@@ -118,6 +142,28 @@ class Capabilities(BaseModel):
         description="Supported language codes, or null when the engine is language-agnostic / accepts free-form.",
     )
     parameters: list[ParamSpec] = Field(default_factory=list)
+    streaming: StreamingCapability | None = Field(
+        None,
+        description=(
+            "Native streaming synthesis support. Presence-based: this key is "
+            "entirely OMITTED from the serialized document (not null/false) "
+            "when the engine does not support streaming."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        """Drop the ``streaming`` key entirely when unset (presence-based).
+
+        A plain ``None`` default would otherwise serialize as
+        ``"streaming": null`` for every engine, which is exactly the signal
+        this design deliberately avoids (existing non-streaming engines must
+        see zero change to their capabilities document).
+        """
+        data = handler(self)
+        if data.get("streaming") is None:
+            data.pop("streaming", None)
+        return data
 
 
 def _is_nonfinite(value: Any) -> bool:

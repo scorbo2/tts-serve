@@ -73,13 +73,20 @@ capabilities.
   in-context mode hard-requires a transcript.
 - **Qwen3-TTS (MLX)** — Apple-Silicon-native counterpart to Qwen3-TTS, run
   through `mlx-audio` instead of `qwen_tts`/PyTorch, for a controlled A/B
-  comparison between the two backends. ICL cloning only, so `reference_text`
-  is **required** (no speaker-embedding fallback). No device env var: MLX has
-  no device-selection knob, so `device` is always reported as `mlx`. `seed`
-  is meaningful (seeds MLX's global RNG via `mx.random.seed()`, which drives
-  the talker's token sampling). Does not (yet) expose `temperature` /
-  `top_p` / `repetition_penalty`, long-text chunking, streaming, or
-  voice-library profiles — see
+  comparison between the two backends. `POST /synthesize` is ICL cloning
+  only, so `reference_text` is **required** (no speaker-embedding fallback);
+  this contract is unchanged and isolated from the engine's new `POST
+  /stream` endpoint, which does native MLX model-level streaming (mlx-audio's
+  own incremental decoder — not this project's long-text chunking) and
+  supports **both** ICL and x-vector (speaker-embedding) cloning, selected by
+  whether `reference_text` is supplied. `/stream`'s response is raw
+  headerless little-endian float32 PCM (`pcm_f32le`), mono, 24 kHz — no WAV
+  container — advertised presence-based under the `streaming` key of `GET
+  /capabilities`. No device env var: MLX has no device-selection knob, so
+  `device` is always reported as `mlx`. `seed` is meaningful on both
+  endpoints (seeds MLX's global RNG via `mx.random.seed()`, which drives the
+  talker's token sampling). Does not (yet) expose `temperature` / `top_p` /
+  `repetition_penalty`, long-text chunking, or voice-library profiles — see
   [server_qwen3TTS_mlx.md](server_qwen3TTS_mlx.md) for the full list.
 - **faster-qwen3-tts** — CUDA-only fork of Qwen3-TTS (its CUDA-graph backend
   rejects non-CUDA devices at load time; PyTorch ≥ 2.5.1 required).
@@ -194,6 +201,20 @@ What is covered:
   transcript handling) and Breeze TTS 2 (request dict, template selection,
   guidance kwargs, seed/request-id forwarding); real audio generation is
   still out of scope.
+- Qwen3-TTS MLX only: `POST /stream` — request validation
+  (`streaming_interval` finite/`>0`, ICL-vs-x-vector via `reference_text`
+  presence), ICL/x-vector dispatch to a fake streaming model (`stream=True`,
+  `streaming_interval` forwarded unchanged), the raw `pcm_f32le` chunk
+  transport (byte order, ordering, no buffering, no WAV header), first-chunk
+  prefetch (setup/generation failures before the first chunk are normal HTTP
+  errors, not a 200 with an empty body), and mid-stream failure cleanup.
+  Tests cover one-worker thread affinity, real ASGI disconnect/send-failure
+  handling (ASGI 2.4 and older listener cancellation), disconnect during
+  an active generation step, and send backpressure. Lower-level explicit-close
+  tests also verify decoder reset, lock release, and subsequent streaming
+  and non-streaming synthesis. See the
+  [MLX verification record](server_qwen3TTS_mlx.md#verification-2026-09-27)
+  for separate native runtime results and the memory caveat.
 
 What is *not* covered: actual synthesis (needs a real model + GPU).  The
 `/synthesize` success path is exercised only where a test installs a fake

@@ -6,18 +6,34 @@ MPS), built for a controlled A/B comparison between the two backends on the
 same Mac.  It wraps the same Qwen3-TTS Base checkpoint family through
 ``mlx-audio`` instead of ``qwen_tts``/PyTorch.
 
-Loads the model once on startup, then exposes a single POST endpoint for
-synthesis.  Clients send text, a reference audio sample (base64), and its
-exact transcript; the server returns the generated audio as base64-encoded
-24 kHz WAV.  Only ICL (in-context learning) voice cloning is exposed in this
-first version: ``reference_text`` is required, there is no
-speaker-embedding-only fallback, no long-text chunking, no streaming, and no
-voice-library / preset-voice modes.  (See ``server_qwen3TTS.py`` for those.)
+Loads the model once on startup, then exposes two POST endpoints:
+
+POST /synthesize
+    Complete-file synthesis (unchanged, protected behavior): the full
+    request/response cycle, base64-encoded 24 kHz WAV in one JSON response.
+    ICL (in-context learning) voice cloning only: ``reference_text`` is
+    required, there is no speaker-embedding-only fallback, no long-text
+    chunking, no streaming, and no voice-library / preset-voice modes.  (See
+    ``server_qwen3TTS.py`` for those.)
+
+POST /stream
+    Native MLX model-level streaming (mlx-audio's own incremental decoder,
+    ``Model.generate(..., stream=True)``) -- NOT long-text chunking; there is
+    no text splitting, silence joining, or crossfade here.  ``reference_text``
+    is optional: supplying it selects ICL voice cloning (matching
+    /synthesize's conditioning); omitting it selects x-vector
+    (speaker-embedding) voice cloning instead -- mlx-audio's `Model.generate()`
+    routes on that same presence/absence signal internally.  The response
+    body is raw headerless little-endian float32 PCM (``pcm_f32le``), mono,
+    24 kHz, emitted incrementally as mlx-audio yields each chunk -- no WAV
+    container, no buffering of the complete utterance.  See ``StreamRequest``
+    and the ``streaming`` block of GET /capabilities for the full contract.
 
 Capabilities: GET /capabilities returns a machine-readable description of
 every request parameter, derived from the Pydantic request model so it can
 never drift from what the server actually validates (see the
-tts-engine-common README).
+tts-engine-common README).  Its ``streaming`` block (present because this
+engine supports it) documents the /stream endpoint's fixed wire format.
 
 Model weights are downloaded from HuggingFace on first start unless a local
 path is given.  The language list below is the Base checkpoint's (10
@@ -53,20 +69,25 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 import os
 import random
 import threading
 import time
 import uuid
+from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import anyio
 import mlx.core as mx
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from loguru import logger
 from mlx_audio.tts.utils import load_model
 from mlx_audio.utils import resample_audio
@@ -111,6 +132,25 @@ MIN_REF_DURATION_S = 2.0
 
 # Sanity valve for the request payload (~5 min of 24 kHz audio).
 MAX_AUDIO_B64_LEN = 10_000_000
+
+# mlx-audio's own Model.generate() default for `streaming_interval` (seconds
+# of GENERATED AUDIO accumulated per streamed chunk -- not a wall-clock
+# delay). Official mlx-audio examples use values as low as 0.32 for lower
+# latency at the cost of more per-chunk overhead; no upper bound is
+# documented, so none is enforced here beyond "finite and > 0".
+DEFAULT_STREAMING_INTERVAL_S = 2.0
+
+# /stream's fixed wire format (see StreamingCapability in tts-engine-common
+# and the module docstring): raw headerless little-endian float32 PCM, mono,
+# at the model's own sample rate. Not configurable in this first version --
+# no output-format negotiation.
+STREAM_AUDIO_FORMAT = "pcm_f32le"
+STREAM_CHANNELS = 1
+
+# Voice-conditioning modes /stream supports, selected implicitly by
+# reference_text's presence/absence (no explicit mode parameter -- see
+# StreamRequest).
+STREAM_VOICE_CONDITIONING = ("icl", "x_vector")
 
 # Identical to server_qwen3TTS.py's table: both servers wrap the same
 # Qwen3-TTS Base checkpoint family, and mlx-audio's Qwen3TTS Model.generate()
@@ -229,6 +269,126 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
+class StreamRequest(BaseModel):
+    """A single POST /stream request. Unknown fields are rejected (422).
+
+    Deliberately a SEPARATE model from ``SynthesisRequest`` (never weakened
+    to support streaming, per the approved architecture): ``reference_text``
+    is optional here because its presence/absence IS the conditioning-mode
+    switch --
+
+        reference_text supplied  -> ICL (in-context learning)
+        reference_text omitted   -> x-vector (speaker-embedding)
+
+    -- mirroring how mlx-audio's own ``Model.generate()`` decides internally.
+    There is no explicit ``mode`` field. A *supplied but blank* value (``""``
+    or whitespace) is a malformed ICL request and is rejected (422), never
+    silently reinterpreted as "absent" / x-vector.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Text to synthesize, e.g. 'Hello there'.",
+    )
+    audio_base64: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_AUDIO_B64_LEN,
+        description=(
+            "Reference voice sample as a base64 string.  Any container "
+            "soundfile can decode (WAV, MP3, OGG, FLAC, ...).  ~3 s is enough "
+            "for high-quality cloning."
+        ),
+    )
+    reference_text: str | None = Field(
+        None,
+        min_length=1,
+        description=(
+            "Exact transcript of the reference audio.  If supplied, "
+            "streaming uses ICL (in-context learning) voice cloning "
+            "(matching /synthesize's conditioning); if omitted, streaming "
+            "uses x-vector (speaker-embedding) voice cloning instead.  A "
+            "present-but-blank value is rejected (422), never treated as "
+            "absent."
+        ),
+    )
+    language: Language | None = Field(
+        DEFAULT_LANGUAGE,
+        description=(
+            "Two-letter language code, e.g. 'en', 'zh', or 'auto' for "
+            f"auto-detection (supported: {', '.join(sorted(LANGUAGE_CODES))}).  "
+            "Omitted or empty defaults to 'en'.  Same semantics as "
+            "/synthesize."
+        ),
+    )
+    seed: int | None = Field(
+        None,
+        ge=SEED_MIN,
+        le=SEED_MAX,
+        description=(
+            "Random seed for reproducibility (seeds MLX's global RNG via "
+            "mx.random.seed(), which drives the talker's token sampling). "
+            f"If omitted, a random seed in [{SEED_MIN}, {SEED_MAX}] is chosen. "
+            "Same semantics as /synthesize."
+        ),
+    )
+    streaming_interval: float = Field(
+        DEFAULT_STREAMING_INTERVAL_S,
+        description=(
+            "Seconds of GENERATED AUDIO accumulated per streamed chunk -- "
+            "not a wall-clock delay.  For example, the default 2.0 means "
+            "mlx-audio accumulates approximately two seconds of generated "
+            "audio before yielding a normal full-sized chunk; the actual "
+            "wall-clock time to produce that audio is typically much "
+            "shorter.  Smaller values (mlx-audio's own examples use values "
+            "as low as 0.32) trade lower latency for more per-chunk "
+            "overhead; there is no documented upper bound.  Must be finite "
+            "and greater than 0.  The final chunk of a stream may contain "
+            "less audio than this."
+        ),
+    )
+
+    @field_validator("text")
+    @classmethod
+    def _validate_text(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("text must contain non-whitespace characters")
+        return v
+
+    @field_validator("reference_text")
+    @classmethod
+    def _validate_reference_text(cls, v: str | None) -> str | None:
+        # None means "not supplied" (x-vector) -- Pydantic does not invoke a
+        # field_validator against an omitted field's default, so this only
+        # ever runs with v=None when a client sends an explicit JSON `null`,
+        # which is treated the same as omission. A *supplied* blank/
+        # whitespace-only string is a malformed ICL request, not a mode
+        # switch, so it is rejected loudly rather than silently falling back
+        # to x-vector.
+        if v is None:
+            return None
+        if not v.strip():
+            raise ValueError("reference_text must contain non-whitespace characters")
+        return v
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _normalize_language(cls, v: object) -> str:
+        return normalize_language(v)
+
+    @field_validator("streaming_interval")
+    @classmethod
+    def _validate_streaming_interval(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError(
+                "streaming_interval must be a finite number greater than 0"
+            )
+        return v
+
+
 class HealthResponse(BaseModel):
     """Health / readiness check."""
 
@@ -262,6 +422,13 @@ CAPABILITIES = build_capabilities(
         ),
     },
     languages=sorted(LANGUAGE_CODES),
+    streaming={
+        "endpoint": "/stream",
+        "format": STREAM_AUDIO_FORMAT,
+        "sample_rate": SAMPLE_RATE,
+        "channels": STREAM_CHANNELS,
+        "voice_conditioning": list(STREAM_VOICE_CONDITIONING),
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -352,6 +519,39 @@ async def _unhandled_exception(_request, exc: Exception) -> JSONResponse:
     return JSONResponse(
         status_code=500,
         content={"detail": f"Internal server error: {exc}"},
+    )
+
+
+def _sanitize_nonfinite(value: Any) -> Any:
+    """Replace non-finite floats (NaN/±inf) with ``None``, recursively.
+
+    Pydantic echoes the raw rejected value in each validation error's
+    ``input`` field (e.g. ``-inf`` for a rejected ``streaming_interval``).
+    Starlette's ``JSONResponse`` renders with ``allow_nan=False`` (strict
+    JSON), so a 422 whose detail contains that raw value would otherwise
+    itself fail to serialize and surface as an unrelated 500 -- exactly the
+    class of bug ``CoreSynthesisResponse``'s existing ``rtf``/``time_used``
+    sanitizers guard against for response bodies; this is the same fix for
+    validation-error bodies.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _sanitize_nonfinite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_nonfinite(v) for v in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(
+    _request, exc: RequestValidationError
+) -> JSONResponse:
+    """The normal 422, even when the rejected input is non-finite (see
+    ``_sanitize_nonfinite``)."""
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _sanitize_nonfinite(jsonable_encoder(exc.errors()))},
     )
 
 
@@ -508,6 +708,173 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
+
+@app.post(
+    "/stream",
+    tags=["Synthesis"],
+    summary="Stream speech incrementally from text + reference audio",
+)
+def stream(req: StreamRequest, request: Request) -> StreamingResponse:
+    """
+    Native MLX model-level streaming (mlx-audio's own incremental decoder).
+
+    This is NOT long-text chunking: there is no text splitting, no silence
+    joining, no crossfade -- the model itself yields incremental audio
+    chunks as it generates, and this endpoint forwards each chunk to the
+    client as raw little-endian float32 PCM (pcm_f32le), mono, 24 kHz, as
+    soon as it is produced.
+
+    Conditioning mode is inferred from ``reference_text`` (no explicit mode
+    field): supplying it selects ICL voice cloning, matching /synthesize's
+    conditioning; omitting it selects x-vector (speaker-embedding) voice
+    cloning instead.
+
+    GET /capabilities describes transport and conditioning support under
+    ``streaming``; the full request schema is StreamRequest (also in /docs).
+    """
+    runtime = _get_runtime()
+
+    seed = req.seed if req.seed is not None else random.randint(SEED_MIN, SEED_MAX)
+    engine_language = LANGUAGE_CODE_TO_NAME.get(req.language, req.language)
+    icl = req.reference_text is not None
+
+    logger.info(
+        "Streaming: seed={}, text_len={}, icl={}, lang={} (engine: {}), "
+        "streaming_interval={}",
+        seed,
+        len(req.text),
+        icl,
+        req.language,
+        engine_language,
+        req.streaming_interval,
+    )
+
+    try:
+        raw_audio = decode_base64(req.audio_base64)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid base64 audio: {exc}")
+
+    _check_reference_audio(raw_audio)
+
+    try:
+        ref_wav, ref_sr = _decode_wav(raw_audio)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not decode reference audio: {exc}"
+        )
+
+    return _MLXStreamingResponse(
+        request, req, runtime, ref_wav, ref_sr, seed, engine_language
+    )
+
+
+class _MLXStreamingResponse(StreamingResponse):
+    """Keep one request's MLX state on one worker for its complete lifetime.
+
+    Only streaming execution is replaced. Starlette still owns __call__,
+    ASGI-version handling, its disconnect listener, and background tasks.
+    """
+
+    def __init__(self, request, req, runtime, ref_wav, ref_sr, seed, engine_language):
+        super().__init__(
+            content=(),  # stream_response drives the worker, not body_iterator.
+            media_type="application/octet-stream",
+            headers={
+                "X-Audio-Format": STREAM_AUDIO_FORMAT,
+                "X-Sample-Rate": str(runtime.sample_rate),
+                "X-Audio-Channels": str(STREAM_CHANNELS),
+            },
+        )
+        self.request = request
+        self.req = req
+        self.runtime = runtime
+        self.ref_wav = ref_wav
+        self.ref_sr = ref_sr
+        self.seed = seed
+        self.engine_language = engine_language
+
+    async def stream_response(self, send):
+        # One invocation, not one dispatch per next(): pooled calls do not
+        # guarantee affinity. Do not abandon a worker still owning the lock.
+        await anyio.to_thread.run_sync(self._stream_on_worker, send, abandon_on_cancel=False)
+
+    @staticmethod
+    def _on_loop(callback, *args):
+        try:
+            return anyio.from_thread.run(callback, *args)
+        except FutureCancelledError:
+            # AnyIO's asyncio bridge translates loop cancellation into this
+            # exception. Restore scope cancellation when the inherited older-
+            # ASGI listener cancelled us; never swallow unrelated failures.
+            anyio.from_thread.check_cancelled()
+            raise
+
+    def _disconnected(self):
+        # On older ASGI the inherited listener may consume the disconnect
+        # itself. Its scope cancellation must also stop this worker.
+        anyio.from_thread.check_cancelled()
+        return self._on_loop(self.request.is_disconnected)
+
+    def _stream_on_worker(self, send):
+        anyio.from_thread.check_cancelled()
+        ref_audio = _prepare_ref_audio(
+            self.ref_wav, self.ref_sr, self.runtime.sample_rate
+        )
+        chunk_iter = _stream_pcm_chunks(
+            self.runtime,
+            text=self.req.text,
+            engine_language=self.engine_language,
+            ref_audio_for_model=ref_audio,
+            reference_text=self.req.reference_text,
+            seed=self.seed,
+            streaming_interval=self.req.streaming_interval,
+        )
+        try:
+            # No HTTP 200 until generation has produced its first PCM chunk.
+            try:
+                first_chunk = next(chunk_iter)
+            except StopIteration:
+                logger.warning("Streaming produced no audio: seed={}", self.seed)
+                raise HTTPException(
+                    status_code=500,
+                    detail="The model produced no audio for the supplied text.",
+                )
+            except Exception as exc:
+                logger.error("Streaming setup failed: {}", exc, exc_info=True)
+                raise HTTPException(status_code=500, detail=str(exc))
+
+            if self._disconnected():
+                return
+            self._on_loop(send, {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            })
+            self._on_loop(send, {
+                "type": "http.response.body", "body": first_chunk, "more_body": True,
+            })
+            while not self._disconnected():
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    break
+                # A disconnect during synchronous next() is handled only
+                # after it finishes. Never interrupt MLX or migrate cleanup.
+                if self._disconnected():
+                    return
+                self._on_loop(send, {
+                    "type": "http.response.body", "body": chunk, "more_body": True,
+                })
+        finally:
+            # Only iterator ownership belongs here. Engine cleanup stays in
+            # _stream_pcm_chunks and runs on this same worker before return.
+            chunk_iter.close()
+
+        self._on_loop(send, {
+            "type": "http.response.body", "body": b"", "more_body": False,
+        })
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -567,6 +934,82 @@ def _numpy_to_wav_bytes(audio_array: np.ndarray, sample_rate: int) -> bytes:
         subtype="PCM_16",
     )
     return buffer.getvalue()
+
+
+def _audio_chunk_to_pcm_bytes(audio) -> bytes:
+    """Convert one GenerationResult.audio chunk to raw PCM bytes.
+
+    The fixed /stream wire format (pcm_f32le): IEEE-754 float32, explicit
+    little-endian byte order (``"<f4"``, rather than relying on host
+    endianness), mono, no header. A small, separately-named function so
+    tests can monkeypatch it exactly like ``_numpy_to_wav_bytes`` above,
+    without depending on a real MLX/numpy array in the request path.
+    """
+    mx.eval(audio)
+    arr = np.asarray(audio, dtype=np.float32).reshape(-1)
+    return arr.astype("<f4", copy=False).tobytes()
+
+
+def _stream_pcm_chunks(
+    runtime: Qwen3TTSMLXRuntime,
+    *,
+    text: str,
+    engine_language: str,
+    ref_audio_for_model,
+    reference_text: str | None,
+    seed: int,
+    streaming_interval: float,
+):
+    """Yield raw little-endian float32 PCM bytes for one /stream request.
+
+    Holds the shared ``_synthesis_lock`` for the ENTIRE generator lifetime
+    (not just around individual chunks), so /stream can never run
+    concurrently with /synthesize or another /stream against the shared MLX
+    model state -- mlx-audio's global RNG (seeded per request), its internal
+    ICL cache, and (for stream-vs-stream specifically) the speech tokenizer
+    decoder's incremental conv/KV-cache buffers, which mlx-audio
+    unconditionally resets at the *start* of every streaming call. A `with`
+    block correctly spans the `yield` statements below: the lock is held
+    across suspension points and is only released once this generator is
+    exhausted, raises, or is closed (client disconnect/cancellation delivers
+    a GeneratorExit here via Python's normal generator-close machinery).
+
+    Deterministic cleanup runs in `finally` on every exit path -- normal
+    completion, an exception (before or after the first chunk), or an early
+    `.close()`: the underlying MLX generator is explicitly closed, the
+    streaming decoder state is reset, and the MLX cache is cleared. mlx-audio
+    0.5.4 performs its own equivalent cleanup only on normal completion (no
+    try/finally around its own streaming loop), so an aborted stream must
+    not rely on it -- this is exactly that server-side safety net.
+    """
+    mlx_gen = None
+    with _synthesis_lock:
+        try:
+            mx.random.seed(seed)
+            mlx_gen = runtime.model.generate(
+                text=text,
+                lang_code=engine_language,
+                ref_audio=ref_audio_for_model,
+                ref_text=reference_text,
+                stream=True,
+                streaming_interval=streaming_interval,
+            )
+            for result in mlx_gen:
+                yield _audio_chunk_to_pcm_bytes(result.audio)
+        finally:
+            if mlx_gen is not None:
+                try:
+                    mlx_gen.close()
+                except Exception:
+                    logger.exception("Error closing MLX streaming generator")
+            try:
+                runtime.model.speech_tokenizer.decoder.reset_streaming_state()
+            except Exception:
+                logger.exception("Error resetting MLX streaming decoder state")
+            try:
+                mx.clear_cache()
+            except Exception:
+                logger.exception("Error clearing MLX cache")
 
 
 # ---------------------------------------------------------------------------

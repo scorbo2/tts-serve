@@ -25,11 +25,11 @@ a field's `name` or `type`) are rejected at import time.
 
 | Symbol | Purpose |
 |---|---|
-| `build_capabilities(request_model, *, engine, model, device, sample_rate, watermarked, endpoint=..., reference_audio=..., languages=..., overrides=...) -> Capabilities` | Project a Pydantic request model into the capabilities document. Raises `ValueError` for bad overrides, `DerivationError` for unsupported schema shapes. |
+| `build_capabilities(request_model, *, engine, model, device, sample_rate, watermarked, endpoint=..., reference_audio=..., languages=..., overrides=..., streaming=...) -> Capabilities` | Project a Pydantic request model into the capabilities document. Raises `ValueError` for bad overrides, `DerivationError` for unsupported schema shapes. |
 | `capabilities_endpoint(doc) -> handler` | Async FastAPI handler serving the document as JSON (serialized once at build time). |
 | `add_capabilities_route(app, doc, path="/capabilities")` | Convenience: mount the endpoint on an existing app. |
 | `CoreSynthesisResponse` | Base response model: `audio_base64`, `sample_rate`, `seed`, `time_used`, `rtf`. Subclass it to add engine extras. Sanitizes engine `inf`/`nan` (`rtf` → `null`, `time_used` → `0.0`) because JSON cannot represent them. |
-| `Capabilities` / `ParamSpec` / `ReferenceAudioSpec` | The document models (all `extra="forbid"`). |
+| `Capabilities` / `ParamSpec` / `ReferenceAudioSpec` / `StreamingCapability` | The document models (all `extra="forbid"`). |
 | `decode_base64(data) -> bytes` | Strict base64 decode (`validate=True`); `ValueError` on malformed input. |
 | `compute_rtf(time_used_s, num_samples, sample_rate) -> float \| None` | Real-time factor; `None` when the duration is zero or the result non-finite. |
 | `temp_audio_dir(name) -> Path` | Per-server staging directory under the system temp dir (created). Respects `$TMPDIR`. |
@@ -99,6 +99,13 @@ app.add_api_route("/capabilities", capabilities_endpoint(doc), methods=["GET"])
     "note": "Only the first 10 s are used for speaker conditioning."
   },
   "languages": ["ar", "da", "..."],        // null when free-form / agnostic
+  "streaming": {                           // KEY OMITTED ENTIRELY if the engine doesn't stream
+    "endpoint": "/stream",
+    "format": "pcm_f32le",
+    "sample_rate": 24000,
+    "channels": 1,
+    "voice_conditioning": ["icl", "x_vector"]
+  },
   "parameters": [
     {
       "name": "text",
@@ -134,6 +141,17 @@ Notes:
   are normalized to the inclusive key by the derivation).
 - `languages: null` means "the engine accepts free-form language input" —
   do not treat it as "no languages supported".
+- `streaming` is **presence-based**: pass `streaming={...}` (dict or
+  `StreamingCapability`) to `build_capabilities()` only for an engine that
+  actually offers a native streaming endpoint. When omitted (the default,
+  `None`), the `streaming` key is **left out of the serialized document
+  entirely** — never emitted as `"streaming": null` or a boolean flag — so
+  every existing non-streaming engine's document is byte-for-byte unaffected
+  by this field's existence (`Capabilities` has a custom `model_serializer`
+  that drops the key when unset). The object itself describes only the fixed
+  technical shape of the stream (endpoint, wire format, sample rate,
+  channels, supported voice-conditioning modes) — it is not a full derived
+  parameter list like `parameters` above.
 - `item_type`/`min_items`/`max_items` are only meaningful for `"array"`
   parameters (null otherwise). Array items are always flat scalars —
   nested arrays and object items are rejected at import time.
