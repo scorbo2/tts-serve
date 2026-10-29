@@ -67,9 +67,11 @@ consistency, does not forward it, and advertises `languages: null` in
 capabilities.
 
 **Pocket TTS** is a single-language-per-instance engine: the model is chosen
-at startup (`POCKET_TTS_MODEL`), so the server accepts any well-formed
-two-letter code, does not forward it, and advertises only the loaded model's
-code in `languages`.
+at startup (`POCKET_TTS_MODEL`, or a custom config via `POCKET_TTS_CONFIG`
+for community/offline checkpoints), so the server accepts any well-formed
+two-letter code, does not forward it, and advertises `languages: null` in
+capabilities (the no-support case) — the loaded checkpoint shows up in the
+`model` label.
 
 ## Engine-specific notes
 
@@ -78,7 +80,9 @@ code in `languages`.
   `400`), else a preset `voice`, else the loaded language's default preset;
   clip + preset together is a `422`. No `reference_text` field (the engine
   has no use for a transcript). One instance serves one language
-  (`POCKET_TTS_MODEL`); `language` is accepted but not forwarded. `seed` is
+  (`POCKET_TTS_MODEL`, or `POCKET_TTS_CONFIG` for community/offline YAML
+  checkpoints — mutually exclusive; presets `422` with a custom config);
+  `language` is accepted but not forwarded. `seed` is
   meaningful and reproducible on CPU. Conditioned voice states are cached
   per clip hash / preset (LRU of 8). Synthesis is serialized with a lock:
   `generate_audio()` is not thread-safe and the sampler uses the global

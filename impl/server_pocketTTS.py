@@ -30,7 +30,18 @@ Configuration (environment variables):
                          "italian", "spanish", "dutch"), optionally with a
                          "_24l" suffix, or an "english_*" release.  One
                          instance serves exactly one language.
+                         Mutually exclusive with POCKET_TTS_CONFIG.
                          Default: english
+    POCKET_TTS_CONFIG    Custom model config YAML: a local path, an
+                         https:// URL, or an hf:// path (community models).
+                         A local path with local ``weights_path`` entries is
+                         also the fully-offline path (no HuggingFace traffic
+                         at all).  Mutually exclusive with POCKET_TTS_MODEL.
+                         Preset ``voice`` names are unavailable with a custom
+                         config (the engine precomputes them per shipped
+                         language checkpoint); a clip request or the default
+                         fallback voice must be used instead.
+                         Default: unset (use POCKET_TTS_MODEL)
     POCKET_TTS_QUANTIZE  1 to apply dynamic int8 quantization (about 27%
                          faster on x86 CPUs, no measurable quality loss;
                          install ``pocket-tts[quantize]`` for best speed).
@@ -85,7 +96,9 @@ from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
 
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
     CoreSynthesisResponse,
+    RELEASE_VERSION,
     build_capabilities,
     capabilities_endpoint,
     cleanup_temp,
@@ -115,6 +128,7 @@ LANGUAGE_NAME_TO_CODE = {
 }
 
 MODEL_NAME = os.getenv("POCKET_TTS_MODEL", ENGINE_DEFAULT_MODEL)
+CONFIG = (os.getenv("POCKET_TTS_CONFIG") or "").strip() or None
 QUANTIZE = os.getenv("POCKET_TTS_QUANTIZE", "0") == "1"
 # Pocket TTS is CPU-only here (GPU is not officially supported by the engine;
 # see "Running on GPU" in https://github.com/kyutai-labs/pocket-tts).
@@ -123,12 +137,22 @@ DEVICE = "cpu"
 
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
-    language_name = MODEL_NAME.split("_", 1)[0]
-    if language_name not in LANGUAGE_NAME_TO_CODE:
-        raise ValueError(
-            f"POCKET_TTS_MODEL must start with one of {sorted(LANGUAGE_NAME_TO_CODE)}, "
-            f"got {MODEL_NAME!r}"
-        )
+    if CONFIG is not None:
+        # load_model() rejects language+config together; mirror that at import
+        # time.  POCKET_TTS_MODEL has a default, so only an *explicitly set*
+        # POCKET_TTS_MODEL alongside POCKET_TTS_CONFIG is a real conflict.
+        if "POCKET_TTS_MODEL" in os.environ:
+            raise ValueError(
+                "POCKET_TTS_CONFIG and POCKET_TTS_MODEL are mutually exclusive; "
+                "unset POCKET_TTS_MODEL to load a custom config."
+            )
+    else:
+        language_name = MODEL_NAME.split("_", 1)[0]
+        if language_name not in LANGUAGE_NAME_TO_CODE:
+            raise ValueError(
+                f"POCKET_TTS_MODEL must start with one of {sorted(LANGUAGE_NAME_TO_CODE)}, "
+                f"got {MODEL_NAME!r}"
+            )
     if os.getenv("POCKET_TTS_QUANTIZE", "0") not in ("0", "1"):
         raise ValueError(
             f"POCKET_TTS_QUANTIZE must be 0 or 1, got {os.getenv('POCKET_TTS_QUANTIZE')!r}"
@@ -138,9 +162,11 @@ def _validate_config() -> None:
 _validate_config()
 
 # The one language this process speaks (the model is fixed at load time).
-LANGUAGE_NAME = MODEL_NAME.split("_", 1)[0]
-LANGUAGE_CODE = LANGUAGE_NAME_TO_CODE[LANGUAGE_NAME]
-MODEL_LABEL = f"pocket-tts-{MODEL_NAME}"
+# With a custom config the language is whatever the YAML says; the server
+# cannot introspect it, so it is not claimed anywhere.
+LANGUAGE_NAME = None if CONFIG is not None else MODEL_NAME.split("_", 1)[0]
+LANGUAGE_CODE = None if LANGUAGE_NAME is None else LANGUAGE_NAME_TO_CODE[LANGUAGE_NAME]
+MODEL_LABEL = "pocket-tts-custom-config" if CONFIG is not None else f"pocket-tts-{MODEL_NAME}"
 
 # All shipped configs use a 24 kHz Mimi codec; the response reports the loaded
 # model's own rate.
@@ -174,6 +200,23 @@ VOICE_STATE_CACHE_SIZE = 8
 # language -- e.g. "daan" is Dutch -- and the engine rejects mismatches.)
 PresetVoice = Literal[tuple(_ORIGINS_OF_PREDEFINED_VOICES)]
 
+# Import-time phrasing for the request descriptions: what this process
+# actually speaks, and whether the presets are reachable at all.
+_LANGUAGE_NOTE = (
+    "a checkpoint defined by a custom config (POCKET_TTS_CONFIG), whose "
+    "language the server cannot introspect"
+    if CONFIG is not None
+    else f"the single language of its loaded model ('{LANGUAGE_CODE}' here)"
+)
+_VOICE_AVAILABILITY = (
+    "Unavailable on this server: it loads a custom config, and the engine "
+    "precomputes presets per shipped language checkpoint.  Send "
+    "`audio_base64` instead.  "
+    if CONFIG is not None
+    else "Presets are tied to the language of their recordings; the "
+    "engine rejects a preset that does not match the loaded model.  "
+)
+
 
 class SynthesisRequest(BaseModel):
     """A single synthesis request. Unknown fields are rejected (422)."""
@@ -202,9 +245,9 @@ class SynthesisRequest(BaseModel):
         DEFAULT_LANGUAGE,
         description=(
             "Two-letter language code, e.g. 'en'.  Accepted for API "
-            "consistency but not forwarded: a Pocket TTS server speaks the "
-            f"single language of its loaded model ('{LANGUAGE_CODE}' here), "
-            "whatever is requested.  Omitted or empty defaults to 'en'."
+            "consistency but not forwarded: this server speaks "
+            f"{_LANGUAGE_NOTE}, whatever is requested.  Omitted or empty "
+            "defaults to 'en'."
         ),
     )
     seed: int | None = Field(
@@ -225,9 +268,7 @@ class SynthesisRequest(BaseModel):
         description=(
             "Built-in preset voice name.  Omit (together with "
             "`audio_base64`) to use the loaded language's default voice.  "
-            "Presets are tied to the language of their recordings; the "
-            "engine rejects a preset that does not match the loaded model.  "
-            "Mutually exclusive with `audio_base64`."
+            f"{_VOICE_AVAILABILITY}Mutually exclusive with `audio_base64`."
         ),
     )
 
@@ -259,6 +300,19 @@ class SynthesisRequest(BaseModel):
         # one and handing back a voice the client did not expect.
         if self.audio_base64 is not None and self.voice is not None:
             raise ValueError("audio_base64 and voice are mutually exclusive; send one")
+        if CONFIG is not None and self.voice is not None:
+            # The engine raises ValueError for predefined voices when the
+            # model's origin is not one of its shipped language configs --
+            # that is a predictable client error here, so 422 at the boundary
+            # instead of a 500 deep in the engine.  (Edge case the server
+            # cannot see: pointing POCKET_TTS_CONFIG at a copy of a shipped
+            # config inside the installed package's config dir -- the engine
+            # would accept presets there.  Pathological; not supported here.)
+            raise ValueError(
+                "preset `voice` requires a language checkpoint and is "
+                "unavailable when the server loads POCKET_TTS_CONFIG; "
+                "send audio_base64 instead"
+            )
         return self
 
 
@@ -268,10 +322,14 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it (or hand-rolling this model from
+    BaseModel) is how a server drifts from every other server in the repo.
+    """
+
     serverType: Literal["PocketTTS"] = "PocketTTS"
     model: str = MODEL_LABEL
     device: str = DEVICE
@@ -297,10 +355,19 @@ CAPABILITIES = build_capabilities(
             "Optional: omit to use a built-in preset (`voice`, or the loaded "
             "language's default).  Zero-shot cloning needs the gated model "
             "weights; clips are truncated to 30 s.  The engine does not use "
-            "a transcript of the clip, so there is no `reference_text`."
+            "a transcript of the clip, so there is no `reference_text`.  "
+            "With a custom config (POCKET_TTS_CONFIG) presets are not "
+            "available and the no-clip fallback is Kyutai's own alba clip, "
+            "fetched from HuggingFace on first use -- send a clip to stay "
+            "fully offline."
         ),
     },
-    languages=[LANGUAGE_CODE],  # one model = one language per server instance
+    languages=None,
+    # docs/02 no-support case (the LuxTTS/VoxCPM/Breeze precedent): the code
+    # is accepted but never forwarded, so advertising a request-code list we
+    # do not enforce would be a lie; the loaded checkpoint is visible in the
+    # model label instead.  (With POCKET_TTS_CONFIG the language is not even
+    # knowable.)
 )
 
 # ---------------------------------------------------------------------------
@@ -330,7 +397,7 @@ app = FastAPI(
         "(single shared model).  Machine-readable parameter metadata at "
         "GET /capabilities."
     ),
-    version="0.1.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 
@@ -374,11 +441,20 @@ def _get_runtime() -> PocketRuntime:
     global _runtime
     if _runtime is None:
         logger.info(
-            "Loading {} on cpu (quantize={}; first run downloads from HuggingFace) ...",
+            "Loading {} on cpu (language={!r}, config={!r}, quantize={}; first "
+            "run downloads from HuggingFace unless the config is fully local) ...",
             MODEL_LABEL,
+            None if CONFIG is not None else MODEL_NAME,
+            CONFIG,
             QUANTIZE,
         )
-        model = TTSModel.load_model(language=MODEL_NAME, quantize=QUANTIZE)
+        # load_model rejects language+config together; _validate_config keeps
+        # exactly one of them set, but pass it explicitly anyway.
+        model = TTSModel.load_model(
+            language=None if CONFIG is not None else MODEL_NAME,
+            config=CONFIG,
+            quantize=QUANTIZE,
+        )
         _runtime = PocketRuntime(
             model=model,
             sample_rate=model.sample_rate,
@@ -556,7 +632,15 @@ def _voice_state_for(runtime: PocketRuntime, raw_audio: bytes | None, voice: str
     if raw_audio is not None:
         key = "clip:" + hashlib.sha256(raw_audio).hexdigest()
     else:
-        key = "voice:" + (voice or get_default_voice_for_language(LANGUAGE_NAME))
+        # Default voice: a preset name for shipped language checkpoints; with
+        # a custom config the engine hands back the fallback *clip URL*
+        # instead (precomputed states belong to the released weights).
+        key = "voice:" + (
+            voice
+            or get_default_voice_for_language(
+                LANGUAGE_NAME, config=CONFIG
+            )
+        )
 
     cached = _voice_states.get(key)
     if cached is not None:
