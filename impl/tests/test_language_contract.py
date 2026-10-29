@@ -22,7 +22,10 @@ import server_dotsTTS
 import server_fasterQwen3TTS
 import server_indexTTS
 import server_luxTTS
+import server_ming3TTS
+import server_ming3TTS_moe
 import server_omnivoice
+import server_pocketTTS
 import server_qwen3TTS
 import server_qwen3TTS_mlx
 import server_voxcpm
@@ -38,8 +41,11 @@ SERVERS = [
     (server_dotsTTS, True),
     (server_indexTTS, False),
     (server_luxTTS, False),
+    (server_ming3TTS, False),
+    (server_ming3TTS_moe, False),
     (server_voxcpm, False),
     (server_breezeBlue, False),
+    (server_pocketTTS, False),
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -50,8 +56,11 @@ SERVER_IDS = [
     "dots-tts",
     "index-tts",
     "lux-tts",
+    "ming3-tts",
+    "ming3-tts-moe",
     "voxcpm",
     "breeze-blue",
+    "pocket-tts",
 ]
 
 
@@ -89,8 +98,10 @@ def _payload(module):
     # transcript is a hard requirement rather than an optional refinement.
     # BreezeBlue is the same: both of its supported modes (voice clone,
     # voice direction) condition on the clip and its exact transcript.
-    # (faster-qwen3-tts defaults to x-vector mode, which ignores it.)
-    if module in (server_qwen3TTS_mlx, server_breezeBlue):
+    # Ming-3.0-tts MoE: same story, its seed/multilingual cloning tasks are
+    # in-context.  (faster-qwen3-tts defaults to x-vector mode, which
+    # ignores it; ming3-tts 0.5b treats it as an optional refinement.)
+    if module in (server_qwen3TTS_mlx, server_breezeBlue, server_ming3TTS_moe):
         payload["reference_text"] = "A short, exact transcript of the reference clip."
     return payload
 
@@ -206,3 +217,48 @@ def test_capabilities_language_contract(server_contract, client):
     assert language["required"] is False
     # docs/02: null/empty means English — the default advertises it.
     assert language["default"] == "en"
+
+
+# ---------------------------------------------------------------------------
+# GET /capabilities: the enum is advertised in canonical (sorted) order
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_languageEnum_advertisedInCanonicalSortedOrder(server_contract, client):
+    # Landmine guard, not cosmetics: CPython compares and hashes Literal by
+    # the *frozenset* of its args, so pydantic's core-schema cache conflates
+    # any two same-code-set Literals and the first-built model's schema wins
+    # for *both* — silently reordering the enum one server advertises based
+    # on which module happened to build its schema first.  The Ming pair
+    # shipped exactly this bug (the MoE snapshot carried the 0.5b server's
+    # code order), and it was invisible in full-suite runs because the
+    # alphabetical import order matched the contaminated snapshot.
+    #
+    # This test derives the expected order from the document's own
+    # ``languages`` list instead of a committed snapshot, so regenerating a
+    # contaminated snapshot can never make it pass: every server must pin
+    # its Literal to the sorted codes ('auto' first where offered).
+    module, auto_allowed = server_contract
+    doc = client.get("/capabilities").json()
+    by_name = {p["name"]: p for p in doc["parameters"]}
+    enum = by_name["language"]["enum"]
+
+    languages = doc["languages"]
+    if languages is None:
+        # Documented docs/02 no-support case (lux/voxcpm/breeze/dots/
+        # omnivoice): any well-formed code is accepted, the engine gets
+        # nothing, and the free-form str field has no Literal to collide.
+        assert enum is None
+        return
+
+    # The advertised list itself must be sorted, so neither half of the
+    # document carries an order that could drift.
+    assert languages == sorted(languages)
+
+    expected_enum = ["auto", *sorted(languages)] if auto_allowed else sorted(languages)
+    assert enum == expected_enum, (
+        f"{module.__name__}: /capabilities language enum {enum} is not the "
+        f"canonical order {expected_enum} — a pydantic Literal-cache collision "
+        "or an unsorted Literal declaration; pin the Literal to sorted codes "
+        "and regenerate the snapshot."
+    )

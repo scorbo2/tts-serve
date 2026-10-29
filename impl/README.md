@@ -24,6 +24,9 @@ More information:
 - [LuxTTS](server_luxTTS.md)
 - [VoxCPM](server_voxcpm.md)
 - [Breeze TTS 2](server_breezeBlue.md)
+- [Ming 3 TTS (0.5b)](server_ming3TTS.md)
+- [Ming 3 TTS (MoE)](server_ming3TTS_moe.md)
+- [Pocket TTS](server_pocketTTS.md)
 
 
 ## Running
@@ -51,6 +54,11 @@ format differs map it at their own server — the client never sees it:
 Engines with auto-detection expose it as the special value `auto`
 (Qwen3-TTS, Qwen3-TTS (MLX), faster-qwen3-tts, dots.tts).
 
+**Ming 3 TTS** (both servers) needs no mapping table: the engine accepts the
+two-letter codes as-is. Like IndexTTS-2.5, only the advertised codes pass
+validation, and neither Ming task offers auto-detection, so there is no
+`auto`.
+
 **LuxTTS** and **Breeze TTS 2** are the no-support case: the engine has no
 language parameter at all (LuxTTS's tokenizer auto-detects English and
 Chinese per text segment; Breeze is bilingual and auto-detects from the
@@ -58,7 +66,27 @@ input text), so the server accepts any well-formed two-letter code for API
 consistency, does not forward it, and advertises `languages: null` in
 capabilities.
 
+**Pocket TTS** is a single-language-per-instance engine: the model is chosen
+at startup (`POCKET_TTS_MODEL`, or a custom config via `POCKET_TTS_CONFIG`
+for community/offline checkpoints), so the server accepts any well-formed
+two-letter code, does not forward it, and advertises `languages: null` in
+capabilities (the no-support case) — the loaded checkpoint shows up in the
+`model` label.
+
 ## Engine-specific notes
+
+- **Pocket TTS** — CPU-only, 24 kHz. Reference audio is **optional**: the
+  voice is `audio_base64` (zero-shot clone; needs the gated weights, else a
+  `400`), else a preset `voice`, else the loaded language's default preset;
+  clip + preset together is a `422`. No `reference_text` field (the engine
+  has no use for a transcript). One instance serves one language
+  (`POCKET_TTS_MODEL`, or `POCKET_TTS_CONFIG` for community/offline YAML
+  checkpoints — mutually exclusive; presets `422` with a custom config);
+  `language` is accepted but not forwarded. `seed` is
+  meaningful and reproducible on CPU. Conditioned voice states are cached
+  per clip hash / preset (LRU of 8). Synthesis is serialized with a lock:
+  `generate_audio()` is not thread-safe and the sampler uses the global
+  torch RNG.
 
 - **Chatterbox** — no `reference_text` field: it conditions purely on the
   reference audio. Output is PerTh-watermarked by the library itself. Only the
@@ -162,6 +190,27 @@ capabilities.
   with a lock (shared KV/codec state; the engine's own API is single-request).
   `BREEZEBLUE_FAST_ALL=1` enables the CUDA-graph fast path (one-time warmup
   from the engine repo's `configs/fast.json`, ~14.4 GiB vs ~7.7 GiB eager).
+- **Ming 3 TTS** — 44.1 kHz output (new rate; the engine family's audio VAE
+  rate). The checkpoint comes in two flavors with **conflicting dependency
+  pins**, so there are two servers in two environments: `server_ming3TTS.py`
+  (0.5b dense, `ming_tts`) and `server_ming3TTS_moe.py` (7.9B MoE that the
+  engine confusingly calls "tiny", `ming_tiny`). The engine is a bare git
+  repo — both servers need the repo root on `PYTHONPATH` (guarded import
+  with an actionable startup message). `language` codes (`zh,en,ja,ko,de,fr,es`)
+  are passed verbatim — no server-side mapping — and there is no `auto`.
+  The 0.5b server treats `reference_text` as an optional refinement
+  (omitted = speaker-embedding-only fallback, Qwen3-TTS convention) and
+  keeps content-hashed staged clips on disk (the engine caches encoded
+  prompts per path **in memory**; same-seed requests reproduce each other
+  once the clip's prompt is warm, the cold first request only after a
+  server restart — server-side `seed_everything` inside the lock). The MoE server is
+  ICL-only: `reference_text` is **required** (422, Qwen3-TTS MLX
+  convention), the `seed`/`multilingual` engine task is selected from the
+  language code, the seed goes to `generate()` (the engine seeds itself),
+  temp clip files are deleted per request, and the response carries an
+  extra `stopped` flag (false = possibly truncated). Sampler defaults come
+  from the engine's `ming_tiny.task_protocol` `FORMAL_*` constants — the
+  test stub mirrors them; keep them in sync.
 
 ## Tests (`tests/`)
 
@@ -191,13 +240,15 @@ What is covered:
   (stubbed runtime, empty generator).
 - The `/synthesize` success path with a fake model — pins what the server
   forwards to the engine: faster-qwen3-tts (the `xvec_only` mode flag and
-  transcript handling) and Breeze TTS 2 (request dict, template selection,
-  guidance kwargs, seed/request-id forwarding); real audio generation is
-  still out of scope.
+  transcript handling), Breeze TTS 2 (request dict, template selection,
+  guidance kwargs, seed/request-id forwarding), and both Ming 3 TTS servers
+  (engine task/knob forwarding, seed handling — server-side re-seeding on
+  the 0.5b, engine-side on the MoE — and staged-file kept vs deleted per
+  request); real audio generation is still out of scope.
 
 What is *not* covered: actual synthesis (needs a real model + GPU).  The
 `/synthesize` success path is exercised only where a test installs a fake
-model (faster-qwen3-tts and Breeze TTS 2).
+model (faster-qwen3-tts, Breeze TTS 2, Ming 3 TTS ×2).
 
 ### Snapshots
 

@@ -31,6 +31,7 @@ Configuration (environment variables):
 
 Install the engine (pinned git commit -- see note below):
     pip install "git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2"
+Or use the uv environment in envs/chatterbox/ (python3 tools/serve.py chatterbox).
 
 Extra dependencies beyond the Chatterbox package:
     pip install fastapi uvicorn loguru soundfile
@@ -112,9 +113,13 @@ except ImportError as exc:
 
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    canonical_language_codes,
+    canonical_language_literal,
     cleanup_temp,
     compute_rtf,
     decode_base64,
@@ -165,9 +170,12 @@ MAX_AUDIO_B64_LEN = 10_000_000
 # ---------------------------------------------------------------------------
 
 # Dynamic Literal built from the engine's own language table, so the request
-# schema, the /capabilities enum, and engine-side validation share one source.
-# (dict preserves insertion order, so the enum is stable across processes.)
-Language = Literal[tuple(SUPPORTED_LANGUAGES)]
+# schema, the /capabilities enum, and engine-side validation share one
+# source.  Built via the shared helper to pin canonical sorted order rather
+# than relying on the dict's insertion order (see
+# tts_engine_common.canonical_language_literal for the pydantic Literal
+# collision that makes relying on declaration order unsafe).
+Language = canonical_language_literal(SUPPORTED_LANGUAGES)
 
 
 class SynthesisRequest(BaseModel):
@@ -278,10 +286,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["Chatterbox"] = "Chatterbox"
     model: str = MODEL_LABEL
     device: str = DEVICE
@@ -308,7 +319,7 @@ CAPABILITIES = build_capabilities(
             "clips are truncated."
         ),
     },
-    languages=list(SUPPORTED_LANGUAGES),
+    languages=list(canonical_language_codes(SUPPORTED_LANGUAGES)),
     overrides={
         "exaggeration": {"step": 0.05},
         "cfg_weight": {"step": 0.05},
@@ -346,7 +357,7 @@ app = FastAPI(
         "serialized (single shared model).  Machine-readable parameter "
         "metadata at GET /capabilities."
     ),
-    version="0.2.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 

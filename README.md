@@ -34,6 +34,9 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [LuxTTS](impl/server_luxTTS.md)
 - [VoxCPM](impl/server_voxcpm.md)
 - [Breeze TTS 2](impl/server_breezeBlue.md)
+- [Pocket TTS](impl/server_pocketTTS.md)
+- [Ming 3 TTS (0.5b)](impl/server_ming3TTS.md)
+- [Ming 3 TTS (MoE)](impl/server_ming3TTS_moe.md)
 
 ## Quickstart
 
@@ -41,7 +44,10 @@ Refer to the `Installation` section in one of the engine-specific documents abov
 
 Note: you can install multiple engines on the same server, provided they
 each have their own environment (venv, conda). Do not install multiple engines
-in the same environment - their dependency trees will conflict.
+in the same environment - their dependency trees will conflict. With `uv`, some
+engines can also get a dedicated environment built from a local git checkout
+of the engine, and started with `python3 tools/serve.py <engine>` (see `envs/`
+and the engine's document).
 
 Once up and running, you can use the supplied `speak.py` tool to talk to it:
 
@@ -63,7 +69,7 @@ curl http://localhost:7500/health
 
 Every server has:
 - `GET /` - informational landing page
-- `GET /health` - server health
+- `GET /health` - server health (type, model, device, and the tts-serve release `version`)
 - `GET /docs` - Swagger docs
 - `POST /synthesize` - synthesize speech
 
@@ -105,6 +111,8 @@ for how the endpoint is generated.
 tts-engine-common/   Shared FastAPI/Pydantic package (no torch): capabilities
                      derivation, core models, /capabilities route, helpers.
 impl/                The engine servers + their (GPU-free) tests.
+envs/                Optional per-engine uv environments (local engine checkouts).
+tools/               speak.py command-line testing tool; serve.py envs/ launcher.
 docs/                Design documents.
 ```
 
@@ -117,6 +125,26 @@ python -m pytest tts-engine-common/tests/ impl/tests/ tools/tests/
 # Regenerate the /capabilities snapshots after changing a request schema
 python impl/tests/update_snapshots.py
 ```
+
+### Versioning
+
+tts-serve keeps two independent version numbers — don't conflate them:
+
+- **Release version** (`RELEASE_VERSION` in `tts-engine-common/src/tts_engine_common/core.py`):
+  the number every server reports as `version` from `GET /health`. When you start a
+  release cycle, bump this constant **in the same commit** where you add the
+  README changelog placeholder below; the final value must match the release's
+  git tag (tags have no `v` prefix: `1.4`, not `v1.4`).
+- **Schema version** (`SCHEMA_VERSION`, same file): the client-contract version,
+  advertised as `schema_version` in `GET /capabilities`. Bump it **only** for
+  backwards-incompatible changes to the request/response contract — new engines
+  and new optional parameters are additive and must not bump it, because
+  version-gating clients (like `tools/speak.py`) refuse unknown schema versions
+  outright.
+
+If a release cycle breaks backwards compatibility, both numbers move: the
+release version per the usual cycle, and `SCHEMA_VERSION` once, with the
+capabilities snapshots regenerated.
 
 ## Testing
 
@@ -147,6 +175,7 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
 - [`docs/01-server-generification.md`](docs/01-server-generification.md) — `/capabilities` design and open questions
 - [`docs/02-language-handling.md`](docs/02-language-handling.md) — Amendments to `language` parameter handling
 - [`docs/03-speak-script.md`](docs/03-speak-script.md) — addition of a handy command-line testing tool
+- [`docs/04-engine-environments.md`](docs/04-engine-environments.md) — per-engine uv environments built from local engine checkouts
 
 ## Release notes
 
@@ -165,3 +194,8 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Update new-tts-engine skill a little (#42)
 - **2026-09-27** [v1.4]
   - Added support for BreezeBlue (#20)
+- **Work in progress; add release date when ready** (v1.5)
+  - Added support for Ming 3 TTS: 0.5b dense and 7.9B MoE ("tiny") voice
+    cloning, two servers (the engine's two checkpoints pin conflicting
+    dependencies)
+  - TODO: release notes for v1.5 release go here

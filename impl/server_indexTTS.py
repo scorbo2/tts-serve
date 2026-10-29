@@ -90,9 +90,13 @@ from indextts.infer_v2_5 import IndexTTS2
 from indextts.utils.model_download import snapshot_download
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    canonical_language_codes,
+    canonical_language_literal,
     compute_rtf,
     decode_base64,
     normalize_language,
@@ -172,8 +176,11 @@ DEVICE_REPORT = (
 # ---------------------------------------------------------------------------
 
 # Dynamic Literal over the engine's language codes so the request schema and
-# the /capabilities enum share one source.
-Language = Literal[tuple(LANGUAGE_CODES)]
+# the /capabilities enum share one source.  Built via the shared helper (the
+# five codes happen to already be sorted, but the helper pins the canonical
+# order structurally and rejects malformed tables at import time — see
+# tts_engine_common.canonical_language_literal).
+Language = canonical_language_literal(LANGUAGE_CODES)
 
 
 class SynthesisRequest(BaseModel):
@@ -362,10 +369,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["index-tts"] = "index-tts"
     model: str = MODEL_DIR
     device: str = DEVICE_REPORT
@@ -396,7 +406,7 @@ CAPABILITIES = build_capabilities(
             "started with INDEXTTS_USE_QWEN_EMO=1) — at most one per request."
         ),
     },
-    languages=list(LANGUAGE_CODES),
+    languages=list(canonical_language_codes(LANGUAGE_CODES)),
     overrides={
         "emotion_alpha": {"step": 0.05},
         "duration_factor": {"step": 0.1},
@@ -441,7 +451,7 @@ app = FastAPI(
         "and get back cloned speech, with optional emotion control.  "
         "Machine-readable parameter metadata at GET /capabilities."
     ),
-    version="0.2.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 

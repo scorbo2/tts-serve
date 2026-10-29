@@ -57,9 +57,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from qwen_tts import Qwen3TTSModel
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    canonical_language_codes,
+    canonical_language_literal,
     compute_rtf,
     decode_base64,
     normalize_language,
@@ -127,8 +131,11 @@ _validate_config()
 
 # Dynamic Literal over the Base checkpoint's language codes (+ the engine's
 # 'auto' auto-detection sentinel) so the request schema and the
-# /capabilities enum share one source.
-Language = Literal[("auto", *LANGUAGE_CODES)]
+# /capabilities enum share one source.  Built via the shared helper to pin
+# canonical order ('auto' first, then sorted codes — not the mapping's
+# declaration order); see tts_engine_common.canonical_language_literal for
+# the pydantic Literal-cache collision that makes that pinning mandatory.
+Language = canonical_language_literal(LANGUAGE_CODES, auto=True)
 
 
 class SynthesisRequest(BaseModel):
@@ -229,10 +236,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["Qwen3-TTS"] = "Qwen3-TTS"
     model: str = MODEL_NAME_OR_PATH
     device: str = DEVICE
@@ -259,7 +269,7 @@ CAPABILITIES = build_capabilities(
             "omitted, cloning falls back to speaker-embedding-only mode."
         ),
     },
-    languages=sorted(LANGUAGE_CODES),
+    languages=list(canonical_language_codes(LANGUAGE_CODES)),
     overrides={
         "x_vector_only_mode": {"advanced": True},
         "temperature": {"step": 0.05},
@@ -294,7 +304,7 @@ app = FastAPI(
         "get back cloned speech.  Machine-readable parameter metadata at "
         "GET /capabilities."
     ),
-    version="0.2.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 

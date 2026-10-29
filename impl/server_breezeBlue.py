@@ -128,6 +128,8 @@ except ModuleNotFoundError as exc:
 
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
@@ -364,10 +366,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["breeze-tts-2"] = "breeze-tts-2"
     model: str = MODEL_NAME_OR_PATH
     device: str = DEVICE
@@ -436,7 +441,7 @@ app = FastAPI(
         "serialized (single shared model).  Machine-readable parameter "
         "metadata at GET /capabilities."
     ),
-    version="0.1.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 

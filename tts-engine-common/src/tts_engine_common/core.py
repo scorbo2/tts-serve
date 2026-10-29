@@ -5,6 +5,19 @@ from __future__ import annotations
 import base64
 import math
 
+# The tts-serve release version: the one constant every /health endpoint
+# reports and every FastAPI app metadata carries (the old per-server
+# `version="0.x.y"` stamps that drifted between 0.1.0 and 0.3.0 and matched
+# no release anyone could name are gone — this rules them all now).
+# Bump it at the *start* of each release cycle, in the same commit that adds
+# the README changelog placeholder; the final value must match the git tag
+# (git tags carry no 'v' prefix: "1.4", not "v1.4").
+# NOT the same thing as SCHEMA_VERSION below: this number changes on every
+# release, backwards-compatible or not; SCHEMA_VERSION changes only when the
+# client contract breaks.  See the version-bump skill (.agents/skills/) for
+# the full workflow.
+RELEASE_VERSION = "1.5"
+
 # Bumped only for breaking changes to the capabilities document (see
 # docs/01-server-generification.md, section 3.5).
 # History: v2 (2026-09) — `language` contract solidified to two-letter codes
