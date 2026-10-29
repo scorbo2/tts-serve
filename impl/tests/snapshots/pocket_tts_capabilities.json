@@ -16,11 +16,9 @@
     ],
     "min_duration_s": 1.0,
     "max_duration_s": null,
-    "note": "Optional: omit to use a built-in preset (`voice`, or the loaded language's default).  Zero-shot cloning needs the gated model weights; clips are truncated to 30 s.  The engine does not use a transcript of the clip, so there is no `reference_text`."
+    "note": "Optional: omit to use a built-in preset (`voice`, or the loaded language's default).  Zero-shot cloning needs the gated model weights; clips are truncated to 30 s.  The engine does not use a transcript of the clip, so there is no `reference_text`.  With a custom config (POCKET_TTS_CONFIG) presets are not available and the no-clip fallback is Kyutai's own alba clip, fetched from HuggingFace on first use -- send a clip to stay fully offline."
   },
-  "languages": [
-    "en"
-  ],
+  "languages": null,
   "parameters": [
     {
       "name": "text",
@@ -65,7 +63,7 @@
       "type": "string",
       "required": false,
       "default": "en",
-      "description": "Two-letter language code, e.g. 'en'.  Accepted for API consistency but not forwarded: a Pocket TTS server speaks the single language of its loaded model ('en' here), whatever is requested.  Omitted or empty defaults to 'en'.",
+      "description": "Two-letter language code, e.g. 'en'.  Accepted for API consistency but not forwarded: this server speaks the single language of its loaded model ('en' here), whatever is requested.  Omitted or empty defaults to 'en'.",
       "min": null,
       "max": null,
       "step": null,

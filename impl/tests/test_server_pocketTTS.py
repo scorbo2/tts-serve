@@ -70,9 +70,18 @@ def test_capabilities_voice_enum_is_the_engines_preset_table(client):
     assert by_name["voice"]["enum"] == list(srv._ORIGINS_OF_PREDEFINED_VOICES)
 
 
-def test_capabilities_advertise_the_one_loaded_language(client):
+def test_capabilities_advertise_no_languages_and_no_language_enum(client):
+    # docs/02 no-support case (the LuxTTS/VoxCPM/Breeze precedent): the
+    # request language is accepted but never forwarded, so there is nothing
+    # to advertise and nothing to enforce -- an advertised list this server
+    # would not police is a lie clients gate on.  Which language the process
+    # speaks is visible in the model label instead.
     doc = client.get("/capabilities").json()
-    assert doc["languages"] == [srv.LANGUAGE_CODE] == ["en"]
+    by_name = {p["name"]: p for p in doc["parameters"]}
+    assert doc["languages"] is None
+    assert by_name["language"]["enum"] is None
+    assert srv.LANGUAGE_CODE == "en"  # import-time mapping still exists...
+    assert doc["model"] == srv.MODEL_LABEL == "pocket-tts-english"  # ...but travels via the label
     assert doc["device"] == "cpu"
     assert doc["sample_rate"] == 24000
 
@@ -88,6 +97,10 @@ def test_health(client):
     assert body["serverType"] == "PocketTTS"
     assert body["device"] == "cpu"
     assert body["model"] == srv.MODEL_LABEL
+    # The tts-serve release version comes from the single shared constant;
+    # pinning to srv.RELEASE_VERSION (not a literal) keeps this release-proof
+    # while still catching a server that forgot to wire it in.
+    assert body["version"] == srv.RELEASE_VERSION
 
 
 def test_root_landing_page(client):
@@ -318,14 +331,14 @@ def test_synthesize_engine_failure_is_500(client, fake_model, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _import_with_env(**env):
+def _import_with_env(*, print_expr: str = "s.LANGUAGE_CODE", **env):
     full = dict(os.environ)
     full.update(env)
     full["PYTHONPATH"] = os.pathsep.join(
         [str(_bootstrap.COMMON_SRC), str(_bootstrap.IMPL_DIR), str(_bootstrap.STUBS_DIR)]
     )
     return subprocess.run(
-        [sys.executable, "-c", "import server_pocketTTS as s; print(s.LANGUAGE_CODE)"],
+        [sys.executable, "-c", f"import server_pocketTTS as s; print({print_expr})"],
         env=full,
         capture_output=True,
         text=True,
@@ -349,3 +362,56 @@ def test_bad_quantize_value_fails_fast():
     result = _import_with_env(POCKET_TTS_QUANTIZE="yes")
     assert result.returncode != 0
     assert "POCKET_TTS_QUANTIZE" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# POCKET_TTS_CONFIG (custom model YAML: local path / https:// / hf://)
+# ---------------------------------------------------------------------------
+
+
+def test_config_and_explicit_model_together_fail_fast():
+    # load_model() rejects language+config together; the server must mirror
+    # that at import time, not at model-load time after a silent default.
+    result = _import_with_env(
+        POCKET_TTS_MODEL="french",
+        POCKET_TTS_CONFIG="hf://some/community-model/czech.yaml@deadbeef",
+    )
+    assert result.returncode != 0
+    assert "mutually exclusive" in result.stderr
+
+
+def test_config_skips_the_model_name_validation():
+    # With a custom config the (defaulted, ignored) POCKET_TTS_MODEL must not
+    # be name-checked; the config is what names the model.
+    result = _import_with_env(
+        print_expr="(s.MODEL_LABEL, s.LANGUAGE_CODE)",
+        POCKET_TTS_CONFIG="hf://some/community-model/czech.yaml@deadbeef",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "('pocket-tts-custom-config', None)"
+
+
+def test_preset_voice_with_custom_config_is_rejected(client, monkeypatch):
+    # The engine raises ValueError for predefined voices when the loaded
+    # origin is not a shipped language config -- a predictable client error,
+    # so the server 422s at the boundary instead of 500ing in the engine.
+    monkeypatch.setattr(srv, "CONFIG", "/srv/models/pocket-tts/custom_local.yaml")
+    response = _post(client, _payload(voice="alba"))
+    assert response.status_code == 422
+    assert "POCKET_TTS_CONFIG" in response.json()["detail"][0]["msg"]
+
+
+def test_synthesize_default_voice_with_custom_config_falls_back_to_the_fallback_clip(
+    client, fake_model, monkeypatch
+):
+    # GIVEN a custom config: the engine cannot use precomputed preset states,
+    # so no-clip/no-voice requests condition on the fallback voice's *audio
+    # file* (get_default_voice_for_language(config=...) returns its URL).
+    from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_CUSTOM_MODEL
+
+    monkeypatch.setattr(srv, "CONFIG", "/srv/models/pocket-tts/custom_local.yaml")
+
+    # WHEN a no-voice request runs, THEN the engine is asked for exactly that
+    # clip URL (and the request still succeeds end-to-end):
+    assert _post(client, _payload()).status_code == 200
+    assert fake_model.states_built == [(DEFAULT_VOICE_FOR_CUSTOM_MODEL, False)]
