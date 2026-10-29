@@ -61,3 +61,5 @@ def setup() -> None:
     os.environ.pop("MING3_TTS_TEXT_NORMALIZATION", None)  # default: 1 (documented in the server docstring)
     os.environ["MING3_TTS_MOE_DEVICE"] = "cuda"  # mirror server's documented default
     os.environ.pop("MING3_TTS_MOE_MODEL", None)  # default: inclusionAI/Ming-3.0-tts-tiny
+    os.environ.pop("POCKET_TTS_MODEL", None)     # default: english
+    os.environ.pop("POCKET_TTS_QUANTIZE", None)  # default: 0

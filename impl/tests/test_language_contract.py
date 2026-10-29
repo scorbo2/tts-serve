@@ -25,6 +25,7 @@ import server_luxTTS
 import server_ming3TTS
 import server_ming3TTS_moe
 import server_omnivoice
+import server_pocketTTS
 import server_qwen3TTS
 import server_qwen3TTS_mlx
 import server_voxcpm
@@ -44,6 +45,7 @@ SERVERS = [
     (server_ming3TTS_moe, False),
     (server_voxcpm, False),
     (server_breezeBlue, False),
+    (server_pocketTTS, False),
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -58,6 +60,7 @@ SERVER_IDS = [
     "ming3-tts-moe",
     "voxcpm",
     "breeze-blue",
+    "pocket-tts",
 ]
 
 

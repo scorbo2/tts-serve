@@ -34,6 +34,7 @@ import server_luxTTS  # noqa: E402
 import server_ming3TTS  # noqa: E402
 import server_ming3TTS_moe  # noqa: E402
 import server_omnivoice  # noqa: E402
+import server_pocketTTS  # noqa: E402
 import server_qwen3TTS  # noqa: E402
 import server_qwen3TTS_mlx  # noqa: E402
 import server_voxcpm  # noqa: E402
@@ -54,6 +55,7 @@ ENGINES = (
     (server_ming3TTS_moe, "ming3_tts_moe_capabilities.json"),
     (server_voxcpm, "voxcpm_capabilities.json"),
     (server_breezeBlue, "breeze_blue_capabilities.json"),
+    (server_pocketTTS, "pocket_tts_capabilities.json"),
 )
 
 
