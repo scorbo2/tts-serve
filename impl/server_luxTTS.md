@@ -106,6 +106,13 @@ Two upstream engine quirks to be aware of (neither is a tts-serve bug):
 - On the **CPU** path, the engine ignores `LUX_TTS_MODEL` entirely and always
   downloads the default model (an upstream bug in `zipvoice`'s CPU loader).
 
+The server also works around one engine text quirk: the engine's English
+normalizer expands title abbreviations ("Mrs" -> "misess") but leaves the
+period, which espeak then treats as the end of a sentence. "or so Mrs. Hudson
+informed me" got a sentence break, and a reworded clause, at "Mrs.". The server
+drops the period after these titles when a word follows (and spells out
+"Prof." as "Professor"); "Ms." is left alone because espeak reads it correctly.
+
 ### Run on a different device
 
 By default, LuxTTS will run on `cuda`. To force a different device:

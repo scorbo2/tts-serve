@@ -242,3 +242,38 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "3" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Title abbreviations — the engine leaves their period, espeak ends the sentence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (
+            "within the hour, or so Mrs. Hudson informed me earlier.",
+            "within the hour, or so Mrs Hudson informed me earlier.",
+        ),
+        ("Mr. and Mrs. Smith", "Mr and Mrs Smith"),
+        ("ask DR. Watson", "ask DR Watson"),
+        ("St. Paul's and Capt. Hook", "St Paul's and Capt Hook"),
+        ("I suspect Prof. Moriarty.", "I suspect Professor Moriarty."),
+    ],
+)
+def test_drop_title_periods_removes_period_before_a_word(text, expected):
+    assert srv.drop_title_periods(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I shall wait for Ms. Adler.",  # espeak reads "Ms." correctly, "Ms" as "Mez"
+        "We asked the Dr.",  # ends the text: a real full stop
+        "Lunch, etc. Then home.",  # not a title
+        "Hmmrs. Dr.Watson",  # no word boundary / no space after the period
+    ],
+)
+def test_drop_title_periods_leaves_other_periods(text):
+    assert srv.drop_title_periods(text) == text

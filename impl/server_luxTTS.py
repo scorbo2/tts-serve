@@ -77,6 +77,7 @@ import base64
 import io
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -532,7 +533,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             # The engine's `language` value is not forwarded: it has no
             # language parameter (docs/02 no-support case).
             wav = runtime.model.generate_speech(
-                req.text,
+                drop_title_periods(req.text),
                 encoded_prompt,
                 num_steps=req.num_steps,
                 guidance_scale=req.guidance_scale,
@@ -583,6 +584,29 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 # ---------------------------------------------------------------------------
 
 _TEMP_AUDIO_DIR = temp_audio_dir("lux_tts_rest_api")
+
+# Title abbreviations followed by a word.  The engine's English normalizer
+# expands most of these ("Mrs" -> "misess") but leaves the period, which
+# espeak then reads as a full stop: "within the hour, or so Mrs. Hudson
+# informed me" got a sentence break, and the clause around it reworded, at
+# "Mrs.".  "Prof" is not expanded by the engine and espeak reads "Prof." as
+# "prof" plus a full stop, so it is spelled out here.  "Ms." is left alone:
+# espeak handles it, and without the period it says "Mez".
+_TITLE_PERIOD_RE = re.compile(
+    r"\b(mrs?|drs?|st|rev|hon|lt|sgt|capt|col|gen|maj|ft|prof)\.(?=\s+\w)",
+    re.IGNORECASE,
+)
+
+
+def drop_title_periods(text: str) -> str:
+    """Remove the period after title abbreviations so the engine does not end
+    the sentence there ("Mrs. Hudson" -> "Mrs Hudson")."""
+
+    def replace(match: re.Match) -> str:
+        title = match.group(1)
+        return "Professor" if title.lower() == "prof" else title
+
+    return _TITLE_PERIOD_RE.sub(replace, text)
 
 
 def seed_everything(seed: int) -> None:
