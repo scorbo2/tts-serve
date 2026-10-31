@@ -228,6 +228,25 @@
       "item_labels": null,
       "group": "engine",
       "advanced": true
+    },
+    {
+      "name": "calm_exclamations",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "Speak exclamations in a normal voice.  The model reads a sentence ending in '!' much higher and louder, close to shouting; when true, '!' is sent to the engine as '.' ('?!' as '?').",
+      "min": null,
+      "max": null,
+      "step": null,
+      "enum": null,
+      "min_length": null,
+      "max_length": null,
+      "item_type": null,
+      "min_items": null,
+      "max_items": null,
+      "item_labels": null,
+      "group": "engine",
+      "advanced": false
     }
   ]
 }
