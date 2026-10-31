@@ -242,3 +242,31 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "3" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# calm_exclamations — "!" makes the model shout; optionally sent as "."
+# ---------------------------------------------------------------------------
+
+
+def test_synthesize_calm_exclamations_nonBoolean_rejected(client):
+    payload = _valid_payload()
+    payload["calm_exclamations"] = "loudly"
+    assert _post(client, payload).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Ah, Mrs. Hudson!", "Ah, Mrs. Hudson."),
+        ("Ah! Mrs. Hudson, the tea!", "Ah. Mrs. Hudson, the tea."),
+        ("Excellent!!!", "Excellent."),
+        ("What?!", "What?"),
+        ("Really!?", "Really?"),
+        ('"Elementary!" he said.', '"Elementary." he said.'),
+        ("太好了！", "太好了."),
+        ("Is it? It is.", "Is it? It is."),
+    ],
+)
+def test_calm_exclamations(text, expected):
+    assert srv.calm_exclamations(text) == expected

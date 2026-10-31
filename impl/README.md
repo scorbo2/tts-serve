@@ -126,6 +126,9 @@ capabilities.
   flag in place. `return_smooth` selects the 24 kHz vocoder head
   (upsampled to 48 kHz) instead of the full-band 48 kHz head — same rate,
   different artifact profile; try it if you hear metallic artifacts.
+  `calm_exclamations` (default off) sends `!` to the engine as `.` (`?!` as
+  `?`): the model reads a sentence ending in `!` much higher and louder,
+  close to shouting.
 - **VoxCPM** — 48 kHz output (with dots.tts and LuxTTS). Supports three
   modes: voice design (no reference audio -- a `(control instruction)` prefix
   in `text` steers the generated voice), controllable cloning (reference audio

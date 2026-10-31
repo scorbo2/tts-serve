@@ -23,6 +23,11 @@ Quick stats:
     fails with HTTP 500 rather than a friendly 400.
   - the first request after startup also pays a one-time librosa
     initialisation (~10 s).
+  - a sentence ending in `!` is read much higher and louder, close to
+    shouting ("Ah, Mrs. Hudson!" came out more than an octave above the
+    speaker's normal pitch). `calm_exclamations: true` sends `!` to the engine
+    as `.` (`?!` as `?`) so chat-model exclamations are spoken in a normal
+    voice. Off by default.
 
 ## Installation
 

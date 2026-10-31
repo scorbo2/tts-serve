@@ -27,6 +27,13 @@ bit-identical output, but on CUDA some kernels are non-deterministic, so
 repeated runs can differ by ~1e-7 in sample values.  Do not promise
 bit-exact reproducibility for GPU generations.
 
+`calm_exclamations` (off by default) works around the model's reading of
+"!": an exclamation mark makes it deliver the whole sentence much higher and
+louder, close to shouting ("Ah, Mrs. Hudson!" came out more than an octave
+above the speaker's normal pitch).  When set, the server turns "!" into "."
+("?!" into "?") in the text sent to the engine, so exclamations from chat
+models are spoken in a normal voice.
+
 Model weights are downloaded from HuggingFace (YatharthS/LuxTTS) on first
 start.  Set HF_TOKEN in the environment if your checkpoint needs it.
 
@@ -77,6 +84,7 @@ import base64
 import io
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -252,6 +260,15 @@ class SynthesisRequest(BaseModel):
         description=(
             "Target RMS for the reference clip (README: higher makes it "
             "sound louder, ~0.01 recommended; engine default 0.001)."
+        ),
+    )
+    calm_exclamations: bool = Field(
+        False,
+        description=(
+            "Speak exclamations in a normal voice.  The model reads a "
+            "sentence ending in '!' much higher and louder, close to "
+            "shouting; when true, '!' is sent to the engine as '.' "
+            "('?!' as '?')."
         ),
     )
 
@@ -532,7 +549,7 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             # The engine's `language` value is not forwarded: it has no
             # language parameter (docs/02 no-support case).
             wav = runtime.model.generate_speech(
-                req.text,
+                calm_exclamations(req.text) if req.calm_exclamations else req.text,
                 encoded_prompt,
                 num_steps=req.num_steps,
                 guidance_scale=req.guidance_scale,
@@ -583,6 +600,20 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 # ---------------------------------------------------------------------------
 
 _TEMP_AUDIO_DIR = temp_audio_dir("lux_tts_rest_api")
+
+# A run of exclamation/question marks with at least one "!" ("!", "!!", "?!",
+# "!?"), ASCII or full-width (the engine maps "！" to "!" itself).
+_EXCLAMATION_RE = re.compile(r"[!?！？]*[!！][!?！？]*")
+
+
+def calm_exclamations(text: str) -> str:
+    """Turn exclamation marks into a full stop ("?!" into "?") so the engine
+    reads the sentence in a normal speaking voice."""
+
+    def replace(match: re.Match) -> str:
+        return "?" if re.search(r"[?？]", match.group()) else "."
+
+    return _EXCLAMATION_RE.sub(replace, text)
 
 
 def seed_everything(seed: int) -> None:
