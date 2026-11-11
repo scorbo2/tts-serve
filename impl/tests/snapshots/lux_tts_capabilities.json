@@ -16,7 +16,7 @@
     ],
     "min_duration_s": 3.0,
     "max_duration_s": null,
-    "note": "The engine transcribes the reference clip with Whisper (openai/whisper-base on GPU, whisper-tiny on CPU) \u2014 there is no transcript field, and every request pays the ASR cost.  Only the first prompt_duration seconds are used; roughly 10 s of clean speech clones best.  The first request after startup also pays a one-time librosa initialisation (~10 s)."
+    "note": "The engine transcribes the reference clip with Whisper (openai/whisper-base on GPU, whisper-tiny on CPU) \u2014 there is no transcript field, and every request pays the ASR cost.  Only the first prompt_duration seconds are used, transcription included: a clip that opens with silence inside that window is a 400, so lead with speech (or raise prompt_duration).  Roughly 10 s of clean speech clones best.  The first request after startup also pays a one-time librosa initialisation (~10 s)."
   },
   "languages": null,
   "parameters": [
@@ -25,7 +25,7 @@
       "type": "string",
       "required": true,
       "default": null,
-      "description": "Text to synthesize, e.g. 'Hello there'.",
+      "description": "Text to synthesize, e.g. 'Hello there'.  The engine's tokenizer keeps ASCII letters, Chinese characters and <pinyin>/[tag] parts and drops everything else, so text made only of punctuation, digits, emoji or other scripts (Cyrillic, Greek, Japanese, Korean, Arabic, ...) has nothing to speak and is rejected with 422.",
       "min": null,
       "max": null,
       "step": null,

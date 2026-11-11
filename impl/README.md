@@ -144,10 +144,17 @@ capabilities (the no-support case) — the loaded checkpoint shows up in the
   every request pays the ASR cost, and the first request after startup also
   pays a one-time librosa initialisation (~10 s). No `language` forwarding:
   the engine's tokenizer auto-detects English and Chinese per segment
-  (other scripts are dropped). `seed` is meaningful (solver initial noise
-  from the PyTorch RNG): bit-identical output on CPU, near-identical on
-  CUDA (non-deterministic GPU kernels). The runtime demands a file path for
-  prompt audio,
+  (other scripts are dropped). The engine's two "nothing to speak" crashes
+  are pre-flighted: text the tokenizer empties (`...`, `1234`, Markdown
+  fences, emoji, Cyrillic/Japanese/Korean text) is a **422**, and a reference
+  clip whose transcribable window — the first `prompt_duration` seconds, not
+  the whole clip — yields no Whisper transcript is a **400**; both checks run
+  under the synthesis lock. See
+  [server_luxTTS.md](server_luxTTS.md#nothing-to-speak) for the measured
+  tokenizer table and the reference-clip gotchas. `seed` is meaningful (solver
+  initial noise from the PyTorch RNG): bit-identical output on CPU,
+  near-identical on CUDA (non-deterministic GPU kernels). The runtime demands
+  a file path for prompt audio,
   so the server writes a temp file; the reference is one-shot (no engine
   prompt cache), so the file is deleted per request. Synthesis is serialized
   with a lock: `generate_speech()` mutates the shared vocoder's `return_48k`
