@@ -19,6 +19,17 @@ auto-detects English and Chinese per text segment (other scripts are
 dropped).  The `language` field is accepted for API consistency (docs/02)
 but is not forwarded to the engine.
 
+Two of the engine's "nothing to speak" crashes are pre-flighted at the server
+boundary, because a client that speaks one sentence per request hits them
+routinely: text the engine's own tokenizer turns into zero tokens (`...`,
+`1234`, Markdown fences, emoji, Cyrillic, Japanese, Korean, ...) is a 422, and
+a reference clip whose first `prompt_duration` seconds yield no Whisper
+transcript is a 400 that names that window.  Both checks run under the
+synthesis lock (the tokenizer normalizes text through a shared, stateful
+`inflect` engine) and both fail open, so an engine surprise is never turned
+into a new 500.  Measured tokenizer verdicts and the reference-clip gotchas:
+server_luxTTS.md.
+
 `seed` is meaningful: the flow-matching solver draws its initial noise from
 the PyTorch RNG, so the same seed and inputs reproduce the same *initial
 noise*.  Reproducibility of the final audio, though, is device-dependent:
@@ -149,6 +160,11 @@ MIN_PROMPT_DURATION_S = 3.0
 # Sanity valve for the request payload (~80 s of 48 kHz audio).
 MAX_AUDIO_B64_LEN = 10_000_000
 
+# How much of a rejected text goes into the log line.  The whole text is
+# logged nowhere (chat replies carry user data); a prefix is enough to tell
+# "the client sent a bare ..." from "the engine's normalizer died".
+REJECTED_TEXT_PREVIEW_CHARS = 80
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
@@ -163,7 +179,13 @@ class SynthesisRequest(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
-        description="Text to synthesize, e.g. 'Hello there'.",
+        description=(
+            "Text to synthesize, e.g. 'Hello there'.  The engine's tokenizer "
+            "keeps ASCII letters, Chinese characters and <pinyin>/[tag] parts "
+            "and drops everything else, so text made only of punctuation, "
+            "digits, emoji or other scripts (Cyrillic, Greek, Japanese, "
+            "Korean, Arabic, ...) has nothing to speak and is rejected with 422."
+        ),
     )
     audio_base64: str = Field(
         ...,
@@ -318,10 +340,12 @@ CAPABILITIES = build_capabilities(
         "note": (
             "The engine transcribes the reference clip with Whisper "
             "(openai/whisper-base on GPU, whisper-tiny on CPU) — there is "
-            "no transcript field, and every request pays the ASR cost.  "
-            "Only the first prompt_duration seconds are used; roughly 10 s "
-            "of clean speech clones best.  The first request after startup "
-            "also pays a one-time librosa initialisation (~10 s)."
+            "no transcript field, and every request pays the ASR cost.  Only "
+            "the first prompt_duration seconds are used, transcription "
+            "included: a clip that opens with silence inside that window is a "
+            "400, so lead with speech (or raise prompt_duration).  Roughly "
+            "10 s of clean speech clones best.  The first request after "
+            "startup also pays a one-time librosa initialisation (~10 s)."
         ),
     },
     languages=None,  # no fixed list; two-letter codes (docs/02), not forwarded
@@ -529,11 +553,22 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
 
         with _synthesis_lock:
             seed_everything(seed)
+            # Nothing for the engine to say?  Ask before the engine does: an
+            # empty token list sends the duration prediction to zero (or,
+            # on the ONNX/CPU graph, negative) frames of new audio, and the
+            # vocoder aborts in its first Conv1d — a bare 500 no client can
+            # act on.  Inside the lock: the engine tokenizer normalizes text
+            # through a shared, stateful inflect engine.
+            _check_text_is_speakable(runtime, req.text)
             encoded_prompt = runtime.model.encode_prompt(
                 prompt_audio_path,
                 duration=req.prompt_duration,
                 rms=req.prompt_rms,
             )
+            # Same failure class, one step later: if Whisper found no "en"/"zh"
+            # speech in the clip's transcribable window, the prompt token count
+            # is 0 and the duration prediction divides by it.
+            _check_reference_was_transcribed(encoded_prompt, req.prompt_duration)
             # The engine's `language` value is not forwarded: it has no
             # language parameter (docs/02 no-support case).
             wav = runtime.model.generate_speech(
@@ -575,6 +610,8 @@ def synthesize(req: SynthesisRequest) -> SynthesisResponse:
             rtf=rtf,
         )
 
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Synthesis failed: {}", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -597,6 +634,128 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _check_text_is_speakable(runtime: LuxTTSRuntime, text: str) -> None:
+    """Reject text the engine's own tokenizer turns into nothing.
+
+    ``EmiliaTokenizer.get_segment`` (``zipvoice/tokenizer/tokenizer.py``)
+    classifies every character as Chinese (U+4E00–U+9FA5), "en" (ASCII
+    A–Z/a–z) or "other", and silently drops whole "other" segments.  A text
+    made up entirely of "other" characters — punctuation, digits, markdown
+    fences, emoji, or any non-Latin/non-Chinese script — therefore tokenizes
+    to an EMPTY token list, and the engine has no path for that:
+    ``forward_text_inference_ratio_duration`` predicts exactly (or, on the
+    ONNX/CPU graph, fewer than) the prompt length, so zero frames of new
+    audio reach the vocoder, which aborts in its first Conv1d —
+    ``Calculated padded input size per channel: (6). Kernel size: (7)`` —
+    and the client gets a 500 it cannot do anything about.
+
+    Asking the engine's tokenizer is the only rule that cannot drift (it also
+    catches the square-bracket case: a lone ``[laughs]`` maps to no token ids
+    even though it is full of letters).  It is sub-millisecond text work, but
+    it shares the tokenizer's stateful normalizers (``EnglishTextNormalizer``
+    keeps one ``inflect.engine()`` on the tokenizer object), so callers must
+    hold ``_synthesis_lock`` — and clients see the rejection in queue order,
+    after whatever generation is already in flight.
+
+    If the tokenizer *raises*, the request is left alone: a pre-flight must not
+    invent an error the engine would not have reported.  Note the tokenizer
+    partly hides that case from us — ``tokenize_EN``/``tokenize_ZH``/
+    ``tokenize_pinyin`` each swallow their own exceptions and return ``[]``, so
+    a normalizer hiccup on speakable text arrives here as zero tokens and is
+    reported as unspeakable.  The engine sees the same zero tokens and 500s on
+    the same input, so the 422 is the better answer, but the logged token count
+    plus the ``Tokenization of ... failed`` warning the engine emits are what
+    tell the two cases apart.
+    """
+    try:
+        token_ids = runtime.model.tokenizer.texts_to_token_ids([text])
+        # Length, not truthiness: token id 0 is the pad token ``_``, so a list
+        # of ids is never a reliable "has tokens" test.
+        token_count = sum(len(ids) for ids in token_ids)
+    except Exception as exc:  # pre-flight, not the engine call
+        logger.warning(
+            "Tokenizer pre-flight failed ({}); letting the engine handle the text",
+            exc,
+        )
+        return
+
+    if token_count:
+        return
+
+    logger.warning(
+        "Text tokenizes to nothing (text_len={}, tokens=0): {!r}",
+        len(text),
+        text[:REJECTED_TEXT_PREVIEW_CHARS],
+    )
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "text contains nothing this engine can speak: LuxTTS keeps "
+            "only ASCII letters, Chinese characters and <pinyin>/[tag] "
+            "parts, and drops punctuation, digits, emoji and every other "
+            "script (Cyrillic, Greek, Japanese, Korean, Arabic, ...).  "
+            "Send at least one English or Chinese word."
+        ),
+    )
+
+
+def _check_reference_was_transcribed(
+    encoded_prompt: object, prompt_duration: float
+) -> None:
+    """Reject a reference clip whose transcribable window holds no speech.
+
+    LuxTTS conditions on the *transcription* of the reference clip (there is
+    no ``reference_text`` field), and only the first ``prompt_duration``
+    seconds of the clip reach Whisper — ``process_audio`` passes ``duration``
+    straight to ``librosa.load``.  The predicted output length is scaled by
+    ``prompt_features_len / prompt_tokens_len``
+    (``zipvoice/models/zipvoice.py:forward_text_inference_ratio_duration``),
+    so a transcript the tokenizer keeps nothing of divides by zero, the int64
+    cast of the result is garbage, and the request dies with something like
+    ``upper bound and lower bound inconsistent with step sign`` (500).  The
+    clip is the client's, so say 400 and name the window it can act on.
+
+    Necessary, not sufficient: Whisper hallucinates text on silence and music
+    ("Thank you." is the canonical output), so a clip with no speech in it can
+    clear this check with a plausible transcript and yield audio that is not
+    the speaker.  That is a bad clone, not an error, and no check here can
+    catch it — a clean spoken reference is the only reliable input.
+
+    Fail-open like the text pre-flight: every other entry of the encode dict
+    is a tensor, so an engine change that makes ``prompt_tokens`` one too must
+    not turn a valid request into a 500 through this guard.
+    """
+    try:
+        prompt_tokens = (
+            encoded_prompt.get("prompt_tokens")
+            if isinstance(encoded_prompt, dict)
+            else None
+        )
+        no_prompt_tokens = prompt_tokens is not None and all(
+            len(row) == 0 for row in prompt_tokens
+        )
+    except Exception as exc:  # pre-flight, not the engine call
+        logger.warning(
+            "Prompt-token pre-flight failed ({}); letting the engine proceed",
+            exc,
+        )
+        return
+
+    if not no_prompt_tokens:
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "reference audio contains no recognizable speech in its first "
+            f"{prompt_duration:g} s: the engine transcribes only that window "
+            "with Whisper and conditions on the transcript, so silence, "
+            "music, or speech other than English / Chinese cannot be cloned.  "
+            "Start the clip with speech, or raise prompt_duration."
+        ),
+    )
 
 
 def _check_reference_audio(raw_bytes: bytes) -> None:

@@ -198,4 +198,8 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Added support for Ming 3 TTS: 0.5b dense and 7.9B MoE ("tiny") voice
     cloning, two servers (the engine's two checkpoints pin conflicting
     dependencies)
+  - Fix bug in LuxTTS where unspeakable text (`...`, `1234`,
+    markdown fragments, emoji, Cyrillic/Japanese/Korean or anything without
+    an ASCII letter or a Chinese character) would throw a 500 server error.
+    It's now a 422 with an actionable message. (#70)
   - TODO: release notes for v1.5 release go here
