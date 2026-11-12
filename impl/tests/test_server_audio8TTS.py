@@ -821,7 +821,7 @@ def test_encodeWaveform_outOfRangeSamples_neverShipAsFullScalePcm():
 
 
 # ---------------------------------------------------------------------------
-# Engine-specific language tests
+# Prompt-budget pre-flights and the engine failure path
 # ---------------------------------------------------------------------------
 
 
@@ -885,3 +885,119 @@ def test_synthesize_languageWellFormedNonEnglish_passesValidation(client, stub_r
     payload["audio_base64"] = b64(b"this is definitely not audio")
     payload["language"] = "th"
     assert _post(client, payload).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Device resolution -- the engine CLI's rules, enforced before the load
+# ---------------------------------------------------------------------------
+
+
+def _pin_cuda(monkeypatch, available: bool, count: int) -> None:
+    """Pin the CUDA probes so these tests never inherit the host's GPU."""
+    monkeypatch.setattr(srv.torch.cuda, "is_available", lambda: available)
+    monkeypatch.setattr(srv.torch.cuda, "device_count", lambda: count)
+
+
+def test_resolveDevice_autoWithCudaAvailable_resolvesToCuda(monkeypatch):
+    # GIVEN a box that does have a GPU...
+    _pin_cuda(monkeypatch, available=True, count=1)
+
+    # WHEN 'auto' is resolved,
+    device = srv._resolve_device("auto")
+
+    # THEN CUDA wins, un-indexed.
+    assert device.type == "cuda"
+    assert device.index is None
+
+
+def test_resolveDevice_autoWithoutCuda_resolvesToCpuInsteadOfRaising(monkeypatch):
+    # GIVEN a CPU-only box -- the entire reason 'auto' exists in the engine's
+    # grammar (and the case a plain 'cuda' default can never serve).
+    _pin_cuda(monkeypatch, available=False, count=0)
+
+    # WHEN 'auto' is resolved,
+    device = srv._resolve_device("auto")
+
+    # THEN it lands on CPU rather than refusing to start.
+    assert device.type == "cpu"
+
+
+def test_resolveDevice_autoPairOnCpuBox_resolvesToTheOnlyUsablePrecision(monkeypatch):
+    # GIVEN 'auto' device *and* 'auto' dtype on a CPU-only box (the pairing the
+    # module docstring promises: float32 on CPU).
+    _pin_cuda(monkeypatch, available=False, count=0)
+
+    # WHEN both are resolved the way _get_runtime does,
+    dtype = srv._resolve_dtype("auto", srv._resolve_device("auto"))
+
+    # THEN the CPU fallback gets the only precision CPU can run, instead of a
+    # bfloat16-on-CPU request that would die later in _resolve_dtype.
+    assert dtype is srv.torch.float32
+
+
+def test_resolveDevice_explicitCudaWithoutCuda_raises(monkeypatch):
+    # GIVEN an explicit CUDA request on a box with no CUDA (an explicit device
+    # must fail loudly -- unlike 'auto', nobody asked it to make do).
+    _pin_cuda(monkeypatch, available=False, count=0)
+
+    # WHEN it is resolved, THEN the error says why.
+    with pytest.raises(RuntimeError, match="CUDA is not available"):
+        srv._resolve_device("cuda")
+
+
+def test_resolveDevice_indexedCudaWithinDeviceCount_keepsTheOrdinal(monkeypatch):
+    # GIVEN a two-GPU box and a request for the second one.
+    _pin_cuda(monkeypatch, available=True, count=2)
+
+    # WHEN it is resolved, THEN the ordinal survives the check.
+    device = srv._resolve_device("cuda:1")
+    assert (device.type, device.index) == ("cuda", 1)
+
+
+def test_resolveDevice_indexedCudaPastTheLastGpu_raisesNamingBothNumbers(monkeypatch):
+    # GIVEN a one-GPU box.  torch itself is no help here: measured on a real
+    # RTX 4070, torch.device('cuda:99') constructs happily (.type is still
+    # 'cuda') and is_available() only reports that *some* GPU exists.
+    _pin_cuda(monkeypatch, available=True, count=1)
+
+    # WHEN an out-of-range ordinal is resolved,
+    with pytest.raises(
+        RuntimeError, match=r"asks for GPU 9, but this box exposes 1 CUDA device"
+    ):
+        srv._resolve_device("cuda:9")
+
+    # THEN the message names the requested ordinal and what the box has, so the
+    # client is not left guessing which half of the box is missing.
+
+
+def test_getRuntime_deviceThisBoxCannotServe_failsBeforeTouchingTheCheckpoint(monkeypatch):
+    # GIVEN a configured ordinal this box does not have, plus loaders that
+    # record -- and refuse -- any checkpoint access at all.
+    monkeypatch.setattr(srv, "_runtime", None)
+    monkeypatch.setattr(srv, "DEVICE", "cuda:9")
+    _pin_cuda(monkeypatch, available=True, count=1)
+
+    class _NeverTouchTheCheckpoint:
+        def __init__(self, calls):
+            self._calls = calls
+
+        def from_pretrained(self, *args, **kwargs):
+            self._calls.append((args, kwargs))
+            raise AssertionError(
+                "the device guard must reject this box before the checkpoint "
+                "is downloaded and loaded only to fail at .to(device)"
+            )
+
+    calls: list = []
+    loader = _NeverTouchTheCheckpoint(calls)
+    monkeypatch.setattr(srv, "AutoProcessor", loader)
+    monkeypatch.setattr(srv, "AutoModel", loader)
+
+    # WHEN the runtime is requested,
+    with pytest.raises(RuntimeError, match="1 CUDA device"):
+        srv._get_runtime()
+
+    # THEN no weights were fetched, and no half-built runtime is left behind to
+    # make every later request fail with the same stale complaint.
+    assert calls == []
+    assert srv._runtime is None

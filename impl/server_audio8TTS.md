@@ -19,6 +19,11 @@ Quick stats:
   six times slower than real time, so this is a GPU model. There is no MPS
   path: the engine's CLI grammar is `auto|cpu|cuda[:N]` and the server mirrors
   it, so `mps` is a startup error rather than an untested promise.
+  `auto` resolves at model load (CUDA when the box has one, otherwise CPU);
+  `/health` and `/capabilities` echo the **configured** string, so `auto` keeps
+  reading as `auto` even when it lands on CPU. A device the box cannot serve —
+  CUDA requested with no CUDA present, or a `cuda:<index>` past the last GPU —
+  fails at model load *before* the checkpoint is downloaded, not after.
 - **VRAM**: about **6.4 GiB** at bf16, measured on an RTX 4070 (12 GiB card)
   after a few warm requests, allocator reservations included. `fp32` roughly
   doubles the weight memory.
@@ -151,6 +156,9 @@ export AUDIO8_TTS_DTYPE=float32    # required when AUDIO8_TTS_DEVICE=cpu
 curl http://localhost:7500/health
 # {"status":"ok","serverType":"Audio8 TTS","model":"Edge0/Audio8-TTS-Realistic-Air",
 #  "device":"cuda","version":"1.5"}
+# The `device` field is the configured AUDIO8_TTS_DEVICE value, not the resolved
+# one: with AUDIO8_TTS_DEVICE=auto it says "auto" even when the model loaded on
+# CPU. The resolved device is in the startup log line.
 
 curl http://localhost:7500/capabilities      # the full parameter contract
 ```

@@ -16,6 +16,12 @@ class _Cuda:
         return False
 
     @staticmethod
+    def device_count() -> int:
+        # Must stay consistent with is_available(): a stubbed box has no GPU.
+        # Servers that reject an out-of-range 'cuda:<index>' need this to exist.
+        return 0
+
+    @staticmethod
     def empty_cache() -> None:
         pass
 

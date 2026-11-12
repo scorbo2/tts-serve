@@ -64,8 +64,13 @@ Configuration (environment variables):
                        Default: Edge0/Audio8-TTS-Realistic-Air
     AUDIO8_TTS_DEVICE  Device to load on: 'auto' (CUDA when available, else
                        CPU), 'cpu', 'cuda', or 'cuda:<index>'.  Default: cuda.
-                       The grammar is checked at import time; an explicit
-                       device that is unavailable fails at model load.
+                       The grammar is checked at import time; a device this box
+                       cannot serve (CUDA requested without CUDA, or an index
+                       past the last GPU) fails at model load -- before the
+                       checkpoint is fetched, never after.  /health and
+                       /capabilities echo the *configured* string rather than
+                       the resolved device, so 'auto' reports as 'auto' even
+                       when it lands on CPU.
                        The 0.6B is a GPU model -- CPU runs (float32 only) but
                        measured RTF ~6.6 on a 24-core x86 box, i.e. six times
                        slower than real time.
@@ -556,13 +561,34 @@ _synthesis_lock = threading.Lock()
 
 def _resolve_device(value: str) -> torch.device:
     """Map the configured device onto a torch device (the engine CLI's rules)."""
-    resolved = "cuda" if value == "auto" else value
+    if value == "auto":
+        # 'auto' is a request to *choose*, not a request for CUDA, so it must
+        # reach CPU when there is no GPU -- exactly the engine CLI's resolve_device.
+        # Treating it as plain 'cuda' here would crash a CPU-only box at startup
+        # while AUDIO8_TTS_DTYPE=auto was still promising float32 on CPU.
+        resolved = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        resolved = value
+
     device = torch.device(resolved)
-    # torch.device('cuda:1').type is 'cuda', so an indexed device that does not
-    # exist on this box fails here rather than deep inside the loader.
-    if device.type == "cuda" and not torch.cuda.is_available():
+    if device.type != "cuda":
+        return device
+
+    if not torch.cuda.is_available():
         raise RuntimeError(
             f"AUDIO8_TTS_DEVICE={value} requests CUDA, but CUDA is not available"
+        )
+
+    # torch.device accepts *any* ordinal: 'cuda:99' constructs happily, and
+    # is_available() only says some GPU exists.  Without this check the first
+    # complaint is an AcceleratorError at .to(device) -- i.e. after the
+    # checkpoint has already been downloaded and loaded, which is the exact
+    # failure this server promises to catch up front.
+    available_gpus = torch.cuda.device_count()
+    if device.index is not None and device.index >= available_gpus:
+        raise RuntimeError(
+            f"AUDIO8_TTS_DEVICE={value} asks for GPU {device.index}, but this box "
+            f"exposes {available_gpus} CUDA device(s)"
         )
     return device
 
