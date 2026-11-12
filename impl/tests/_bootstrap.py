@@ -67,3 +67,7 @@ def setup() -> None:
     os.environ["AUDIO8_TTS_DEVICE"] = "cuda"      # mirror server's documented default
     os.environ.pop("AUDIO8_TTS_MODEL", None)      # default: Edge0/Audio8-TTS-Realistic-Air
     os.environ.pop("AUDIO8_TTS_DTYPE", None)      # default: auto (bf16 on CUDA, f32 on CPU)
+    os.environ["KITTENTTS_DEVICE"] = "auto"      # mirror server's documented default (capabilities 'device' is machine-dependent; the snapshot test pops it)
+    os.environ.pop("KITTENTTS_MODEL", None)      # default: KittenML/kitten-tts-2
+    os.environ.pop("KITTENTTS_DECODER", None)    # default: empty (repository default decoder)
+    os.environ.pop("KITTENTTS_WEIGHTS", None)    # default: empty (repository default weights)

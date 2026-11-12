@@ -386,6 +386,49 @@ Decisions taken while implementing:
 Side effect worth knowing: on first use, the engine downloads a spaCy/pkuseg
 segmentation model to `~/.pkuseg/`, outside the HuggingFace cache.
 
+### KittenTTS (2026-10)
+
+`envs/kittentts/` builds the KittenTTS 2 server from a sibling `KittenML/KittenTTS`
+checkout. Unlike Chatterbox, the checkout is **not required**: PyPI `kittenml`
+0.9.7 is current with git and `impl/server_kittenTTS.py` only imports what it
+ships. The environment exists for the usual reasons — one engine per
+dependency tree (torch, transformers, plus the diffusers/hydra stack the s3gen
+vocoder drags in), and a `git pull` in the engine taking effect on the next
+server start.
+
+It was verified on a laptop (RTX 3050 4 GB, 15 GB RAM) with the launcher:
+
+- `uv sync --project envs/kittentts` resolved plain PyPI wheels — torch
+  2.15.0+cu132, no overrides or extra indexes needed.
+- The engine's Python model needs roughly 8 GB free VRAM on CUDA, so the 4 GB
+  card ran `KITTENTTS_DEVICE=cpu`. First start downloaded 243 repo files
+  (`KittenML/kitten-tts-2` + the s3gen weights); later starts load warm.
+- `/health` reported `KittenTTS / KittenML/kitten-tts-2 / cpu / 1.5`; the live
+  `/capabilities` was identical to the committed snapshot (both sides `cpu`).
+- Built-in-voice synthesis (curl): 4.6 s of 24 kHz WAV at RTF ≈ 9 on CPU, and
+  two requests with `seed: 7` returned **byte-identical** audio.
+- Cloning via `tools/speak.py` (`--ref-audio` + transcript) produced a 24 kHz
+  clip at RTF ≈ 8.5; repeat requests hit the engine's per-path encode cache
+  and the content-hashed staged files stayed on disk, as designed.
+- `voice: "Chair"` against the live server returned the runtime 422 with the
+  real checkpoint table ("the model offers 115 voices").
+
+The checkout on that box lives outside the sibling layout, so the open
+question "Checkout outside the sibling layout" was exercised for the first
+time: a plain `ln -s /real/path/KittenTTS <parent>/KittenTTS` made the
+committed relative path work without touching the committed pyproject.
+
+Decisions taken while implementing:
+
+- **No torch overrides or indexes.** The engine pins only `torch>=2.6`,
+  unpinned, with no `tool.uv.sources` of its own, so the first environment
+  where nothing has to be replaced. (If the engine later pins an index, the
+  OmniVoice/Chatterbox playbook applies.)
+- **Python 3.12** (`requires-python = ">=3.10"` in the engine; the box's
+  interpreter). The engine imports fine there; no version gymnastics needed.
+- **`student_w4`/`emb4` stay server env vars, not env variants.** One env per
+  *engine*, knobs at startup — the memory trade-offs are runtime choices.
+
 ## Adding an environment for another engine
 
 1. Clone the engine next to tts-serve. If it has its own venv, note that venv's
@@ -423,8 +466,8 @@ segmentation model to `~/.pkuseg/`, outside the HuggingFace cache.
    section to `impl/server_<name>.md`, and list the new directory in the `envs/`
    bullet of `AGENTS.md`.
 
-Done so far: OmniVoice and Chatterbox. Remaining candidates, from the current
-install docs:
+Done so far: OmniVoice, Chatterbox, and KittenTTS. Remaining candidates,
+from the current install docs:
 
 | Engine | Current install | Why an env would help |
 |---|---|---|
