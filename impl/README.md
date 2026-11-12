@@ -27,6 +27,7 @@ More information:
 - [Ming 3 TTS (0.5b)](server_ming3TTS.md)
 - [Ming 3 TTS (MoE)](server_ming3TTS_moe.md)
 - [Pocket TTS](server_pocketTTS.md)
+- [Audio8 TTS (Realistic Air)](server_audio8TTS.md)
 
 
 ## Running
@@ -72,6 +73,12 @@ for community/offline checkpoints), so the server accepts any well-formed
 two-letter code, does not forward it, and advertises `languages: null` in
 capabilities (the no-support case) — the loaded checkpoint shows up in the
 `model` label.
+
+**Audio8 TTS** is the same no-support case with the opposite deployment
+shape: one checkpoint speaks 23 languages and picks the language from the
+input text, so there is nothing to forward and nothing to select at startup.
+The server accepts any well-formed two-letter code, never forwards it, and
+advertises `languages: null`.
 
 ## Engine-specific notes
 
@@ -218,6 +225,33 @@ capabilities (the no-support case) — the loaded checkpoint shows up in the
   extra `stopped` flag (false = possibly truncated). Sampler defaults come
   from the engine's `ming_tiny.task_protocol` `FORMAL_*` constants — the
   test stub mirrors them; keep them in sync.
+- **Audio8 TTS (Realistic Air)** — 44.1 kHz output. The only engine here with
+  **no package to install**: the checkpoint carries its own transformers
+  modelling/processor code (`trust_remote_code=True`), so the server imports
+  `AutoModel`/`AutoProcessor` and nothing engine-specific — the test stand-in
+  is the `transformers` stub, and there is no `audio8_*` stub to write. Do
+  not import the repo's `audio8_tts_infer.py` CLI: its prompt cache is keyed
+  by text alone and would leak one clip's voice into the next request. The
+  clip and its **exact** transcript are one unit (`reference_text` is
+  mandatory with `audio_base64`, invalid without it — both halves 422); no
+  ASR of any kind, and no reference at all means the checkpoint's own voice.
+  The model's single 2048-position text+audio context is why the clip window
+  is 2–20 s and the text cap 1500 characters, why nothing is ever truncated,
+  and why an over-budget prompt is a measured 400 rather than an engine
+  ValueError. The window is enforced on the **decoded** samples (a container
+  header is only an advertisement — a clip whose header and audio disagree by
+  over 0.5 s is a 400), which is why an MP3 with no `Xing`/`Info`/`VBRI`
+  length table is refused too: without one, libsndfile guesses the duration
+  from the first frame and stops there (measured: a 40 s VBR MP3 read back as
+  6.7 s). `max_new_tokens` counts audio *frames* (~21.5/s of audio); the server
+  clamps it and `retry_max_new_tokens` to the context the prompt leaves over —
+  exactly as the engine does — and it rejects (400) a prompt that leaves under
+  256 frames (~12 s) over, because the engine would otherwise answer with a
+  single 46 ms frame and call it `finished` (measured). `retry_max_new_tokens` mirrors the CLI's one
+  retry; the response carries an extra `finished` flag (false = ran out of
+  budget). No temp files: the processor takes in-memory samples. Synthesis is
+  serialized (the model's `_setup_generation_caches` rewrites caches on its
+  own instance).
 
 ## Tests (`tests/`)
 

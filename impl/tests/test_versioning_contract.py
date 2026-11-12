@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from tts_engine_common import RELEASE_VERSION, SCHEMA_VERSION
 from tts_engine_common.models import CoreHealthResponse
 
+import server_audio8TTS
 import server_breezeBlue
 import server_chatterbox
 import server_dotsTTS
@@ -58,6 +59,7 @@ SERVER_MODULES = [
     server_voxcpm,
     server_breezeBlue,
     server_pocketTTS,
+    server_audio8TTS,
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -73,6 +75,7 @@ SERVER_IDS = [
     "voxcpm",
     "breeze-blue",
     "pocket-tts",
+    "audio8-tts",
 ]
 
 

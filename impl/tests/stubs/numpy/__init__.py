@@ -37,6 +37,13 @@ def clip(a, a_min, a_max):
     raise NotImplementedError("numpy stub: clip() is not available in tests")
 
 
+def nan_to_num(a, nan=0.0, posinf=None, neginf=None):
+    # audio8's WAV encoder sanitizes the codec output before clamping it; like
+    # clip(), that is real-NumPy territory the GPU-free suite never reaches
+    # (its tests fake the engine boundary and patch the encoder).
+    raise NotImplementedError("numpy stub: nan_to_num() is not available in tests")
+
+
 def asarray(obj, dtype=None):
     raise NotImplementedError("numpy stub: asarray() is not available in tests")
 
