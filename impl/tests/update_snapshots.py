@@ -31,6 +31,7 @@ import server_chatterbox  # noqa: E402
 import server_dotsTTS  # noqa: E402
 import server_fasterQwen3TTS  # noqa: E402
 import server_indexTTS  # noqa: E402
+import server_kittenTTS  # noqa: E402
 import server_luxTTS  # noqa: E402
 import server_ming3TTS  # noqa: E402
 import server_ming3TTS_moe  # noqa: E402
@@ -58,6 +59,7 @@ ENGINES = (
     (server_breezeBlue, "breeze_blue_capabilities.json"),
     (server_pocketTTS, "pocket_tts_capabilities.json"),
     (server_audio8TTS, "audio8_tts_capabilities.json"),
+    (server_kittenTTS, "kittentts_capabilities.json"),
 )
 
 

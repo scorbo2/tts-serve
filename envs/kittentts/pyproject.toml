@@ -1,0 +1,64 @@
+# Dedicated uv environment for impl/server_kittenTTS.py, built from a local
+# KittenTTS git checkout instead of the PyPI package.
+#
+# Unlike Chatterbox, the PyPI release (kittenml 0.9.7) is current with git --
+# `pip install kittenml` remains the documented default. This environment
+# exists because the engine drags in a heavy, engine-specific tree (torch,
+# transformers, diffusers/hydra for the s3gen vocoder, onnxruntime/phonemizer
+# for the legacy models), and tts-serve's rule is one engine per environment;
+# the checkout route additionally lets a `git pull` in the engine take effect
+# on the next server start.
+#
+# This is a virtual project (nothing here is installed as a package): it only
+# describes the venv. From the tts-serve repo root:
+#
+#     python3 tools/serve.py kittentts      # syncs when needed, then starts
+#
+# or by hand:
+#
+#     uv sync --project envs/kittentts
+#     uv run --project envs/kittentts python impl/server_kittenTTS.py
+#
+# The venv lands in envs/kittentts/.venv; it and uv.lock are gitignored.
+#
+# KittenTTS is expected to be cloned next to tts-serve:
+#
+#     <parent>/KittenTTS    (https://github.com/KittenML/KittenTTS)
+#     <parent>/tts-serve
+#
+# If your checkout lives elsewhere, edit the `kittenml` path under
+# [tool.uv.sources] below. Both KittenTTS and tts-engine-common are installed
+# editable, so a `git pull` in either takes effect on the next server start.
+#
+# Torch: the engine pins only torch>=2.6 and declares no index settings of its
+# own, so the plain PyPI build applies everywhere (x86_64 Linux wheels bundle
+# CUDA 12; macOS gets MPS/CPU; Windows gets PyPI's CPU build, as with a plain
+# install of the engine). No overrides, no extra indexes.
+
+[project]
+name = "tts-serve-env-kittentts"
+version = "0.1.0"
+description = "Environment for the tts-serve KittenTTS server (local KittenTTS checkout)"
+requires-python = ">=3.10"
+dependencies = [
+    "kittenml",
+    "tts-engine-common",
+    "fastapi",
+    "uvicorn",
+    "loguru",
+    "soundfile",
+]
+
+[tool.tts-serve]
+# Server started by tools/serve.py (path relative to the repo root).
+server = "impl/server_kittenTTS.py"
+# Prefix of the server's <PREFIX>_HOST / <PREFIX>_PORT variables; lets
+# `tools/serve.py kittentts --host H --port N` set KITTENTTS_HOST / KITTENTTS_PORT.
+env-prefix = "KITTENTTS"
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+kittenml = { path = "../../../KittenTTS", editable = true }
+tts-engine-common = { path = "../../tts-engine-common", editable = true }

@@ -38,6 +38,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [Ming 3 TTS (0.5b)](impl/server_ming3TTS.md)
 - [Ming 3 TTS (MoE)](impl/server_ming3TTS_moe.md)
 - [Audio8 TTS (Realistic Air)](impl/server_audio8TTS.md)
+- [KittenTTS 2](impl/server_kittenTTS.md)
 
 ## Quickstart
 
@@ -207,4 +208,7 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
     with the reference clip's exact transcript, 23 languages detected from
     the text, and a response `finished` flag that admits when the model ran
     out of its context budget. (#68)
+  - Added support for KittenTTS 2: 1-bit 1.7B speech LM with 115 built-in
+    voices and zero-shot cloning; 24 kHz; also runnable from a local engine
+    checkout via `envs/kittentts/` (#60)
   - TODO: release notes for v1.5 release go here

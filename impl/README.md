@@ -28,6 +28,7 @@ More information:
 - [Ming 3 TTS (MoE)](server_ming3TTS_moe.md)
 - [Pocket TTS](server_pocketTTS.md)
 - [Audio8 TTS (Realistic Air)](server_audio8TTS.md)
+- [KittenTTS 2](server_kittenTTS.md)
 
 
 ## Running
@@ -79,6 +80,12 @@ shape: one checkpoint speaks 23 languages and picks the language from the
 input text, so there is nothing to forward and nothing to select at startup.
 The server accepts any well-formed two-letter code, never forwards it, and
 advertises `languages: null`.
+
+**KittenTTS 2** is also the no-support case, with a twist: the language is
+carried by the *speaker* — the engine has no language parameter, and its
+115 built-in voices include non-English ones named after their language
+(`German`, `Arabic`, ...). The server accepts any well-formed two-letter
+code, does not forward it, and advertises `languages: null`.
 
 ## Engine-specific notes
 
@@ -252,6 +259,23 @@ advertises `languages: null`.
   budget). No temp files: the processor takes in-memory samples. Synthesis is
   serialized (the model's `_setup_generation_caches` rewrites caches on its
   own instance).
+- **KittenTTS 2** — 24 kHz. 1.7B-parameter 1-bit speech LM with two speaker
+  sources: `voice` (one of the checkpoint's 115 built-in voices — unknown
+  names get a runtime `422`, the table is checkpoint data so it is not a
+  capabilities enum) or `audio_base64` zero-shot cloning; the two together
+  are a `422` (the engine treats them as mutually exclusive). With neither,
+  the checkpoint's default voice (`Bruno`) speaks, so `reference_audio` is
+  optional in capabilities. `reference_text` is optional — omitting it
+  triggers an on-the-fly Whisper transcription that runs in English mode
+  (send the transcript for non-English clips); a transcript without a clip
+  is a `422`. Clips are staged content-hashed and **kept** (the engine
+  caches the encoded clip and embedding per path). Expression control
+  lives inside `text` (`[emotion]` / `<event>` / `(((emphasis)))`, engine:
+  early beta) plus `preset` (`stable`/`expressive`) and raw sampler knobs.
+  No `language` forwarding (the voice carries the language). `seed` is
+  meaningful (bit-exact on CPU, near-exact on CUDA). Synthesis is serialized
+  with a lock (shared pending-speaker-embedding state). The server refuses
+  legacy ONNX checkpoints at startup (different engine API).
 
 ## Tests (`tests/`)
 
@@ -299,11 +323,12 @@ Regenerate after changing a server's request schema (or engine constants):
 python tests/update_snapshots.py
 ```
 
-Then review the diff. The dots.tts and IndexTTS-2.5 snapshots record the
-`device` observed on the generating machine; their tests compare everything
-except `device` (machine-dependent — the runtime auto-selects) and only
-assert the value is a sane one (`cuda`/`cpu` for dots.tts;
-`cuda`/`cpu`/`mps`/`xpu` for IndexTTS-2.5).
+Then review the diff. The dots.tts, IndexTTS-2.5 and KittenTTS snapshots
+record the `device` observed on the generating machine; their tests compare
+everything except `device` (machine-dependent — the runtime auto-selects)
+and only assert the value is a sane one (`cuda`/`cpu` for dots.tts and
+KittenTTS — the torch backend has no auto-MPS; `cuda`/`cpu`/`mps`/`xpu` for
+IndexTTS-2.5).
 
 ### Gotchas
 

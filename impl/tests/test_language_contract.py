@@ -22,6 +22,7 @@ import server_chatterbox
 import server_dotsTTS
 import server_fasterQwen3TTS
 import server_indexTTS
+import server_kittenTTS
 import server_luxTTS
 import server_ming3TTS
 import server_ming3TTS_moe
@@ -48,6 +49,7 @@ SERVERS = [
     (server_breezeBlue, False),
     (server_pocketTTS, False),
     (server_audio8TTS, False),
+    (server_kittenTTS, False),
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -64,6 +66,7 @@ SERVER_IDS = [
     "breeze-blue",
     "pocket-tts",
     "audio8-tts",
+    "kitten-tts",
 ]
 
 
