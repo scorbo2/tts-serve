@@ -16,6 +16,7 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
+import server_audio8TTS
 import server_breezeBlue
 import server_chatterbox
 import server_dotsTTS
@@ -46,6 +47,7 @@ SERVERS = [
     (server_voxcpm, False),
     (server_breezeBlue, False),
     (server_pocketTTS, False),
+    (server_audio8TTS, False),
 ]
 SERVER_IDS = [
     "chatterbox",
@@ -61,6 +63,7 @@ SERVER_IDS = [
     "voxcpm",
     "breeze-blue",
     "pocket-tts",
+    "audio8-tts",
 ]
 
 
@@ -101,7 +104,14 @@ def _payload(module):
     # Ming-3.0-tts MoE: same story, its seed/multilingual cloning tasks are
     # in-context.  (faster-qwen3-tts defaults to x-vector mode, which
     # ignores it; ming3-tts 0.5b treats it as an optional refinement.)
-    if module in (server_qwen3TTS_mlx, server_breezeBlue, server_ming3TTS_moe):
+    # Audio8: the processor refuses a reference clip without its transcript,
+    # so the clip and the transcript are a package deal here too.
+    if module in (
+        server_qwen3TTS_mlx,
+        server_breezeBlue,
+        server_ming3TTS_moe,
+        server_audio8TTS,
+    ):
         payload["reference_text"] = "A short, exact transcript of the reference clip."
     return payload
 

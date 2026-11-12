@@ -64,3 +64,6 @@ def setup() -> None:
     os.environ.pop("POCKET_TTS_MODEL", None)     # default: english
     os.environ.pop("POCKET_TTS_CONFIG", None)    # default: unset (language model, not custom config)
     os.environ.pop("POCKET_TTS_QUANTIZE", None)  # default: 0
+    os.environ["AUDIO8_TTS_DEVICE"] = "cuda"      # mirror server's documented default
+    os.environ.pop("AUDIO8_TTS_MODEL", None)      # default: Edge0/Audio8-TTS-Realistic-Air
+    os.environ.pop("AUDIO8_TTS_DTYPE", None)      # default: auto (bf16 on CUDA, f32 on CPU)

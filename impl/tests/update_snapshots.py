@@ -25,6 +25,7 @@ _bootstrap.setup()
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import server_audio8TTS  # noqa: E402
 import server_breezeBlue  # noqa: E402
 import server_chatterbox  # noqa: E402
 import server_dotsTTS  # noqa: E402
@@ -56,6 +57,7 @@ ENGINES = (
     (server_voxcpm, "voxcpm_capabilities.json"),
     (server_breezeBlue, "breeze_blue_capabilities.json"),
     (server_pocketTTS, "pocket_tts_capabilities.json"),
+    (server_audio8TTS, "audio8_tts_capabilities.json"),
 )
 
 

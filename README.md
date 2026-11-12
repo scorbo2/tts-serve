@@ -37,6 +37,7 @@ Suggest a new one on the [project issues page](https://github.com/scorbo2/tts-se
 - [Pocket TTS](impl/server_pocketTTS.md)
 - [Ming 3 TTS (0.5b)](impl/server_ming3TTS.md)
 - [Ming 3 TTS (MoE)](impl/server_ming3TTS_moe.md)
+- [Audio8 TTS (Realistic Air)](impl/server_audio8TTS.md)
 
 ## Quickstart
 
@@ -202,4 +203,8 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
     markdown fragments, emoji, Cyrillic/Japanese/Korean or anything without
     an ASCII letter or a Chinese character) would throw a 500 server error.
     It's now a 422 with an actionable message. (#70)
+  - Added support for Audio8 TTS (Realistic Air): 44.1 kHz zero-shot cloning
+    with the reference clip's exact transcript, 23 languages detected from
+    the text, and a response `finished` flag that admits when the model ran
+    out of its context budget. (#68)
   - TODO: release notes for v1.5 release go here
