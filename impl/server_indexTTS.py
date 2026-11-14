@@ -42,8 +42,11 @@ Configuration (environment variables):
                            Downloaded from HuggingFace if it lacks config.yaml.
                            Default: checkpoints
     INDEXTTS_DEVICE        Device to load the model on: 'cuda', 'cuda:N',
-                           'cpu', 'mps' or 'xpu'.  Unset = the engine
-                           auto-selects (CUDA, else XPU, else MPS, else CPU).
+                           'cpu', 'mps' or 'xpu' ('xpu:N' too).  Unset = the
+                           engine auto-selects (CUDA, else XPU, else MPS, else
+                           CPU).  The shared grammar (docs/01 D8) is checked at
+                           import time; a CUDA index this box does not have
+                           fails before the checkpoint is read.
     INDEXTTS_USE_BF16      '1' to load with bfloat16 weights (lower VRAM
                            use; the engine itself disables it on CPU/MPS).
                            Default: off
@@ -100,6 +103,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     stage_audio,
     temp_audio_dir,
 )
@@ -111,7 +116,8 @@ from tts_engine_common import (
 MODEL_REPO_ID = "IndexTeam/IndexTTS-2.5"
 
 MODEL_DIR = os.getenv("INDEXTTS_MODEL_DIR", "checkpoints").strip() or "checkpoints"
-DEVICE = os.getenv("INDEXTTS_DEVICE", "").strip()
+DEVICE_ENV = "INDEXTTS_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "").strip()
 USE_BF16 = os.getenv("INDEXTTS_USE_BF16", "").strip().lower() in ("1", "true", "yes", "on")
 USE_QWEN_EMO = os.getenv("INDEXTTS_USE_QWEN_EMO", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -151,21 +157,46 @@ def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
     if MODEL_DIR in ("", "."):
         raise ValueError("INDEXTTS_MODEL_DIR must name a real directory, got empty/'.'")
-    if DEVICE:
-        family = DEVICE.split(":", 1)[0]
-        if family not in ("cuda", "cpu", "mps", "xpu"):
-            raise ValueError(
-                f"INDEXTTS_DEVICE must be 'cuda', 'cuda:N', 'cpu', 'mps' or "
-                f"'xpu'; leave it unset for auto-selection, got {DEVICE!r}"
-            )
 
 
 _validate_config()
 
+# What this engine can serve -- the only one here that mentions XPU, and an
+# empty INDEXTTS_DEVICE means exactly what 'auto' means elsewhere (the engine
+# picks).  Grammar rules are shared (docs/01 D8); the old `split(":")[0]` in a
+# membership test accepted 'cuda:abc' and said nothing about a missing GPU.
+DEVICE_FAMILIES = ("auto", "cpu", "cuda", "mps", "xpu")
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(
+    DEVICE_SETTING or "auto", env_var=DEVICE_ENV, families=DEVICE_FAMILIES
+)
+# Empty is a meaningful value on this server: it means "the engine picks", and
+# the loader then passes no device kwarg at all.  So DEVICE stays the (already
+# stripped) setting rather than DEVICE_SPEC.requested, which would hand the
+# engine the literal word 'auto' where it wanted a device name.
+DEVICE = DEVICE_SETTING
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    'auto' is deliberately not checked: the engine is the one choosing, and a
+    box with no GPU is a valid answer for it, not an error.  An explicit
+    'cuda:N' is different -- that is an instruction the machine cannot follow,
+    and torch only notices after the checkpoint is in memory.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
+
+
 # Capabilities/health report a device *family* at import time (the model is
 # not loaded yet); the engine resolves the same auto-selection at load time.
 DEVICE_REPORT = (
-    DEVICE.split(":", 1)[0]
+    DEVICE_SPEC.family
     if DEVICE
     else ("cuda" if torch.cuda.is_available() else "cpu")
 )
@@ -512,6 +543,7 @@ def _get_runtime() -> IndexTTSRuntime:
     """Return the global runtime, loading the model once on first call."""
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading IndexTTS-2.5 model from %r (bf16=%s, qwen_emo=%s) ...",
             MODEL_DIR,

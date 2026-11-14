@@ -211,4 +211,7 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Added support for KittenTTS 2: 1-bit 1.7B speech LM with 115 built-in
     voices and zero-shot cloning; 24 kHz; also runnable from a local engine
     checkout via `envs/kittentts/` (#60)
-  - TODO: release notes for v1.5 release go here
+  - Cleanup: device selection follows shared contract across every server (#73)
+  - Added support for Pocket TTS: CPU-only, 24 kHz, zero-shot cloning or one
+    of the checkpoint's preset voices; per-process language via
+    `POCKET_TTS_MODEL` (#56)

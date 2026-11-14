@@ -12,6 +12,13 @@ from .core import (
     decode_base64,
 )
 from .derive import DerivationError, build_capabilities, spec_from_schema
+from .devices import (
+    DEFAULT_DEVICE_FAMILIES,
+    DeviceSpec,
+    cuda_ordinal_error,
+    parse_device,
+    require_cuda_available,
+)
 from .language import (
     DEFAULT_LANGUAGE,
     canonical_language_codes,
@@ -39,6 +46,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "CORE_FIELDS",
+    "DEFAULT_DEVICE_FAMILIES",
     "DEFAULT_LANGUAGE",
     "RELEASE_VERSION",
     "SCHEMA_VERSION",
@@ -46,6 +54,7 @@ __all__ = [
     "CoreHealthResponse",
     "CoreSynthesisResponse",
     "DerivationError",
+    "DeviceSpec",
     "ParamSpec",
     "ReferenceAudioSpec",
     "__version__",
@@ -56,9 +65,12 @@ __all__ = [
     "canonical_language_literal",
     "cleanup_temp",
     "compute_rtf",
+    "cuda_ordinal_error",
     "decode_base64",
     "is_language_code",
     "normalize_language",
+    "parse_device",
+    "require_cuda_available",
     "spec_from_schema",
     "stage_audio",
     "temp_audio_dir",

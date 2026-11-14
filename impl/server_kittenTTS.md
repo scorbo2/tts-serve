@@ -8,6 +8,15 @@ Quick stats:
   else CPU), `cuda`, `mps` or `cpu`. Budget roughly 8 GB of free VRAM for
   the CUDA path (engine figure), or ~6 GB of system RAM for CPU inference.
   A 4 GB laptop card will **not** hold this model on CUDA — use `cpu`.
+  - `cuda:1` is **not** accepted. The engine compares the device to the
+    literal string `'cuda'` (`kittenml/kittentts2/speaker.py::_choose_device`
+    starts `if self.device != "cuda": return "cpu"`), so an indexed value
+    wouldn't select GPU 1 — it would quietly run the transcription/speaker
+    models on the CPU. To pick which GPU the server gets, pin it upstream:
+    `CUDA_VISIBLE_DEVICES=1 KITTENTTS_DEVICE=cuda`. The value itself is
+    checked at server start, and an explicit `cuda` on a box without CUDA is
+    refused before the ~1.7B checkpoint is loaded (`auto` is never refused —
+    "no GPU" is a valid answer for it).
 - **Notes**:
   - KittenTTS 2 is a 1.7B-parameter **1-bit speech language model** with
     in-context voice cloning. The Python backend is the reference

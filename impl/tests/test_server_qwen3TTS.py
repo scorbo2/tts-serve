@@ -11,6 +11,8 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
+from tts_engine_common.devices import parse_device
+
 import server_qwen3TTS as srv
 from helpers import b64, load_snapshot, make_wav_bytes
 
@@ -194,3 +196,89 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "2" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Device selection (docs/01 D8).
+#
+# The grammar and the shared message are asserted for every server by
+# impl/tests/test_device_contract.py; what is engine-specific here is that the
+# value lands on transformers' `device_map=`, whose documented grammar
+# includes an indexed CUDA device -- so this suite pins that the ordinal
+# actually reaches the loader, and that an ordinal the box does not have is
+# refused before the loader is touched at all.
+# ---------------------------------------------------------------------------
+
+
+def _pin_cuda(monkeypatch, available: bool, count: int) -> None:
+    """Pin the CUDA probes so these tests never inherit the host's GPU."""
+    monkeypatch.setattr(srv.torch.cuda, "is_available", lambda: available)
+    monkeypatch.setattr(srv.torch.cuda, "device_count", lambda: count)
+
+
+class _RecordingLoader:
+    """Stand-in for Qwen3TTSModel: records the load kwargs, downloads nothing."""
+
+    def __init__(self, calls: list):
+        self._calls = calls
+
+    def from_pretrained(self, *args, **kwargs):
+        self._calls.append(kwargs)
+        return types.SimpleNamespace()
+
+
+def _pin_device(monkeypatch, value: str) -> None:
+    """Pin both halves of a configured device: the string the engine is handed
+    and the spec the guard reads (the module builds that pair at import time)."""
+    monkeypatch.setattr(srv, "DEVICE", value)
+    monkeypatch.setattr(
+        srv,
+        "DEVICE_SPEC",
+        parse_device(value, env_var=srv.DEVICE_ENV, families=srv.DEVICE_FAMILIES),
+    )
+
+
+def test_getRuntime_indexedCudaWithinDeviceCount_forwardsTheOrdinalToTheEngine(monkeypatch):
+    # GIVEN a two-GPU box and QWEN3TTS_DEVICE='cuda:1' -- the second GPU used to
+    # be unreachable here because the module tested membership in
+    # ('cuda', 'mps', 'cpu'):
+    monkeypatch.setattr(srv, "_runtime", None)
+    _pin_device(monkeypatch, "cuda:1")
+    _pin_cuda(monkeypatch, available=True, count=2)
+    calls: list = []
+    monkeypatch.setattr(srv, "Qwen3TTSModel", _RecordingLoader(calls))
+
+    # WHEN the runtime is loaded,
+    runtime = srv._get_runtime()
+
+    # THEN the loader was asked for GPU 1, not for 'cuda' with the index
+    # quietly dropped:
+    assert calls, "the loader was never called"
+    assert calls[0]["device_map"] == "cuda:1"
+    assert runtime.device == "cuda:1"
+
+
+def test_getRuntime_indexedCudaPastTheLastGpu_failsBeforeTouchingTheCheckpoint(monkeypatch):
+    # GIVEN a one-GPU box and a request for GPU 9, plus a loader that records
+    # (and refuses) any checkpoint access:
+    monkeypatch.setattr(srv, "_runtime", None)
+    _pin_device(monkeypatch, "cuda:9")
+    _pin_cuda(monkeypatch, available=True, count=1)
+
+    class _NeverTouchTheCheckpoint:
+        def from_pretrained(self, *args, **kwargs):
+            raise AssertionError(
+                "the device guard must reject this box before the checkpoint "
+                "is downloaded and loaded only to fail while placing weights"
+            )
+
+    monkeypatch.setattr(srv, "Qwen3TTSModel", _NeverTouchTheCheckpoint())
+
+    # WHEN the runtime is requested, THEN the shared message names the ordinal
+    # and what the box has (wording pinned once for all servers by the device
+    # contract test),
+    with pytest.raises(RuntimeError, match="asks for GPU 9, but this box exposes 1 CUDA device"):
+        srv._get_runtime()
+
+    # AND no half-built runtime is left behind to fail every later request.
+    assert srv._runtime is None

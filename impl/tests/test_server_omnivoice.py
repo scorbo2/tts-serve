@@ -11,6 +11,8 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
+from tts_engine_common.devices import parse_device
+
 import server_omnivoice as srv
 from helpers import b64, load_snapshot, make_wav_bytes
 
@@ -187,3 +189,90 @@ def test_synthesize_too_short_audio_rejected(client, fake_runtime):
     response = _post(client, payload)
     assert response.status_code == 400
     assert "2" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Device selection (docs/01 D8).
+#
+# Grammar and message wording are asserted once for all servers by
+# impl/tests/test_device_contract.py.  What is engine-specific here is the
+# same half as the Qwen3-TTS server: the value goes to transformers'
+# `device_map=`, which does accept an indexed CUDA device, so GPU 1 became
+# addressable (the old membership tuple could not name it) and the ordinal has
+# to survive to the loader -- or be refused before the loader runs.
+# ---------------------------------------------------------------------------
+
+
+def _pin_cuda(monkeypatch, available: bool, count: int) -> None:
+    """Pin the CUDA probes so these tests never inherit the host's GPU."""
+    monkeypatch.setattr(srv.torch.cuda, "is_available", lambda: available)
+    monkeypatch.setattr(srv.torch.cuda, "device_count", lambda: count)
+
+
+def _pin_device(monkeypatch, value: str) -> None:
+    """Pin both halves of a configured device: the string the engine is handed
+    and the spec the guard reads (the module builds that pair at import time)."""
+    monkeypatch.setattr(srv, "DEVICE", value)
+    monkeypatch.setattr(
+        srv,
+        "DEVICE_SPEC",
+        parse_device(value, env_var=srv.DEVICE_ENV, families=srv.DEVICE_FAMILIES),
+    )
+
+
+class _RecordingLoader:
+    """Stand-in for OmniVoice: records the load kwargs, downloads nothing."""
+
+    def __init__(self, calls: list):
+        self._calls = calls
+
+    def from_pretrained(self, *args, **kwargs):
+        self._calls.append(kwargs)
+        # sampling_rate/device are what the runtime re-reads from the loaded
+        # model, so the fake has to carry them.
+        return types.SimpleNamespace(
+            sampling_rate=srv.SAMPLE_RATE, device=kwargs["device_map"]
+        )
+
+
+def test_getRuntime_indexedCudaWithinDeviceCount_forwardsTheOrdinalToTheEngine(monkeypatch):
+    # GIVEN a two-GPU box and OMNIVOICE_DEVICE='cuda:1':
+    monkeypatch.setattr(srv, "_runtime", None)
+    _pin_device(monkeypatch, "cuda:1")
+    _pin_cuda(monkeypatch, available=True, count=2)
+    calls: list = []
+    monkeypatch.setattr(srv, "OmniVoice", _RecordingLoader(calls))
+
+    # WHEN the runtime is loaded,
+    runtime = srv._get_runtime()
+
+    # THEN GPU 1 reached the loader intact, and the runtime reports the device
+    # the model says it landed on:
+    assert calls, "the loader was never called"
+    assert calls[0]["device_map"] == "cuda:1"
+    assert runtime.device == "cuda:1"
+
+
+def test_getRuntime_indexedCudaPastTheLastGpu_failsBeforeTouchingTheCheckpoint(monkeypatch):
+    # GIVEN a one-GPU box, a request for GPU 9, and a loader that refuses any
+    # checkpoint access at all:
+    monkeypatch.setattr(srv, "_runtime", None)
+    _pin_device(monkeypatch, "cuda:9")
+    _pin_cuda(monkeypatch, available=True, count=1)
+
+    class _NeverTouchTheCheckpoint:
+        def from_pretrained(self, *args, **kwargs):
+            raise AssertionError(
+                "the device guard must reject this box before the checkpoint "
+                "is downloaded and loaded only to fail while placing weights"
+            )
+
+    monkeypatch.setattr(srv, "OmniVoice", _NeverTouchTheCheckpoint())
+
+    # WHEN the runtime is requested, THEN the refusal names the ordinal and what
+    # the box exposes (shared wording: see test_device_contract.py),
+    with pytest.raises(RuntimeError, match="asks for GPU 9, but this box exposes 1 CUDA device"):
+        srv._get_runtime()
+
+    # AND nothing half-loaded is left behind:
+    assert srv._runtime is None

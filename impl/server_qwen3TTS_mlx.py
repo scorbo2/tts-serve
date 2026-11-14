@@ -95,7 +95,10 @@ MODEL_NAME_OR_PATH = os.getenv(
 
 # No device env var: mlx-audio has no device-selection argument, and MLX
 # itself auto-selects its compute backend (Metal on Apple Silicon).  "mlx" is
-# the string reported everywhere a device value is expected.
+# the string reported everywhere a device value is expected.  DEVICE_ENV = None
+# is the device contract test's declaration that the absence is deliberate
+# (impl/tests/test_device_contract.py).
+DEVICE_ENV = None
 DEVICE = "mlx"
 
 # Verified against the installed mlx-audio source: Qwen3TTSModel.ModelConfig

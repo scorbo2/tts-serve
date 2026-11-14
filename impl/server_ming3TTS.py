@@ -58,6 +58,9 @@ Configuration (environment variables):
     MING3_TTS_DEVICE             Torch device to load the model on: 'cuda',
                                  'cuda:N', 'cpu', or 'mps'.  The model runs
                                  in bfloat16; CPU is functional but slow.
+                                 The shared grammar (docs/01 D8) is checked at
+                                 import time; a CUDA request this box cannot
+                                 serve fails before the checkpoint is loaded.
                                  Default: cuda
     MING3_TTS_TEXT_NORMALIZATION Run the engine's FST text normalizer
                                  (needs pynini).  0/1.  Default: 1
@@ -93,7 +96,6 @@ import io
 import math
 import os
 import random
-import re
 import threading
 import time
 import uuid
@@ -136,6 +138,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     stage_audio,
     temp_audio_dir,
 )
@@ -145,7 +149,8 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("MING3_TTS_MODEL", "inclusionAI/Ming-3.0-tts-0.5b")
-DEVICE = os.getenv("MING3_TTS_DEVICE", "cuda")
+DEVICE_ENV = "MING3_TTS_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 
 def _parse_bool_env(raw: str) -> bool:
@@ -187,21 +192,36 @@ DEFAULT_TEMPERATURE = 0.0
 # auto-detection sentinel for these tasks, so no 'auto' member.
 LANGUAGE_CODES = ("zh", "en", "ja", "ko", "de", "fr", "es")
 
-_DEVICE_PATTERN = re.compile(r"^(cuda(:\d+)?|cpu|mps)$")
+# What this engine can serve; the grammar rules themselves are shared
+# (docs/01 D8), so this is capability data rather than another pasted regex.
+# No 'auto': the engine's loader wants a device it was given, and picking one
+# here would be the server guessing at the model's precision.
+DEVICE_FAMILIES = ("cuda", "cpu", "mps")
+DEVICE_ALLOW_INDEX = True
+# The import-time grammar check: a malformed value raises a ValueError naming
+# MING3_TTS_DEVICE before this module finishes importing, i.e. before any
+# download starts.
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    # Grammar check only, VoxCPM-style: 'cuda' / 'cuda:N' / 'cpu' / 'mps'.
-    # Torch itself rejects an unavailable device at load time.
-    if not _DEVICE_PATTERN.fullmatch(DEVICE):
-        raise ValueError(
-            "MING3_TTS_DEVICE must be 'cuda', 'cuda:N', 'cpu', or 'mps', "
-            f"got {DEVICE!r}"
-        )
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
 
-
-_validate_config()
+    Import time only proved the *spelling*.  Whether GPU N exists is a
+    question about the machine, and torch answers it far too late: it hands a
+    CUDA device straight to the loader, which fetches the checkpoint and only
+    then fails at .to(device).
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -468,6 +488,7 @@ def _get_runtime() -> MingTTSRuntime:
     """
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading Ming-3.0-tts (0.5b) model '%s' on device '%s' "
             "(text_normalization=%s) ...",

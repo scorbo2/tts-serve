@@ -101,6 +101,21 @@ sweet spot.
 | `MING3_TTS_HOST` | `0.0.0.0` | Bind host for `python server_ming3TTS.py` |
 | `MING3_TTS_PORT` | `7500` | Bind port |
 
+### Device checks
+
+`MING3_TTS_DEVICE` is validated in two steps, both before the checkpoint is
+touched:
+
+- **Grammar** at server start — only `cuda`, `cuda:N`, `cpu`, `mps` are
+  devices at all. `cuda-ish`, `cuda:`, `tpu` or `mps:0` stop the launch with a
+  message naming `MING3_TTS_DEVICE`.
+- **Existence** when the model loads — `cuda` on a box without CUDA, or
+  `cuda:9` on a one-GPU box, is refused there instead of downloading ~3 GB and
+  failing while weights are placed.
+
+`GET /capabilities` and `/health` keep echoing the *configured* string, so an
+`auto`-style rewrite never shows up in the contract.
+
 ### Text normalization gotcha (`pynini`)
 
 The engine's text normalizer builds FST grammars with `pynini`, which has no

@@ -241,6 +241,22 @@ to MPS, then CPU. `GET /health` (and `GET /capabilities`) report the
 check the startup log ("CUDA not available, switching to MPS/CPU") to see
 what the server is really running on.
 
+Accepted values are `cuda`, `mps`, and `cpu` — **not** `cuda:1`. The engine's
+loader rebuilds the device as `torch.device(device, 0)`
+(`zipvoice/modeling_utils.py`), which hard-codes the ordinal, while its Whisper
+transcriber is handed the raw string — so an indexed value is either rejected by
+torch or ends up splitting the model (GPU 0) and the transcriber (GPU 1) across
+cards. To choose the GPU, pin it upstream instead:
+
+```
+export CUDA_VISIBLE_DEVICES=1
+export LUX_TTS_DEVICE=cuda
+python impl/server_luxTTS.py
+```
+
+A value that names no device (`gpu`, `cuda:1`, `tpu`) stops the server at start
+with a message naming `LUX_TTS_DEVICE` — before the checkpoint is read.
+
 ### CPU thread count
 
 The CPU path is ONNX-based and takes a thread count:

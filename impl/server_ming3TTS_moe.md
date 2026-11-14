@@ -91,6 +91,17 @@ selects the engine task (`en`/`zh` → seed, `de/es/fr/ja/ko` → multilingual).
 | `MING3_TTS_MOE_HOST` | `0.0.0.0` | Bind host for `python server_ming3TTS_moe.py` |
 | `MING3_TTS_MOE_PORT` | `7500` | Bind port |
 
+### Device checks
+
+Same two-step contract as the 0.5b server (docs/01 D8): the *grammar* of
+`MING3_TTS_MOE_DEVICE` is checked at server start (`cuda`, `cuda:N`, `cpu`,
+`mps` — nothing else is a device, and `cuda:1:2` or `tpu` is a launch error
+naming the variable), and the *existence* of the requested CUDA device is
+checked when the model loads, before the 7.9B checkpoint is read. An
+out-of-range index (`cuda:9` on a one-GPU box) is a startup failure with a
+message naming the ordinal and the GPU count, never a 500 on the first
+request.
+
 ## Sampler defaults
 
 `cfg_scale`, `flow_steps`, `sigma`, and `temperature` default to the

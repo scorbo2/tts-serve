@@ -128,4 +128,23 @@ export CHATTERBOX_DEVICE=mps
 python impl/server_chatterbox.py
 ```
 
+Accepted values are `cuda`, `mps`, and `cpu` — **not** `cuda:1`. Chatterbox
+takes a device *family* and keys its own loader decisions on that string, so an
+index is not a documented input here; the risk of accepting it is a subsystem
+silently landing on a different GPU, which is worse than a refused start. To
+pick which GPU Chatterbox gets, pin it with the CUDA environment instead:
+
+```
+export CUDA_VISIBLE_DEVICES=1
+export CHATTERBOX_DEVICE=cuda
+python impl/server_chatterbox.py
+```
+
+A missing GPU is deliberately **not** checked at the server boundary: this
+engine's own loader decides what to do when the requested family is not there,
+and a server-side guard would only pre-empt a fallback that works. If the
+device in `GET /capabilities` doesn't match what you expect, check which card
+the process really got (the configured string is echoed verbatim, never the
+resolved one).
+
 

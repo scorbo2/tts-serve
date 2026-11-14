@@ -42,9 +42,15 @@ Configuration (environment variables):
                         repository directory.  Default: KittenML/kitten-tts-2
     KITTENTTS_DEVICE    Device for the model: 'auto' (engine picks -- CUDA
                         when available, else CPU), 'cuda', 'mps' or 'cpu'.
-                        Default: auto.  The grammar is checked at import
-                        time; an explicit device that is unavailable fails
-                        at model load.
+                        Default: auto.  'cuda:<index>' is deliberately NOT
+                        accepted: the engine's own device handling compares
+                        the value against the literal 'cuda'
+                        (kittenml/kittentts2/speaker.py::_choose_device), so
+                        an indexed value silently runs the reference-clip
+                        transcription on CPU instead.  Pin a GPU with
+                        CUDA_VISIBLE_DEVICES instead.  The shared grammar
+                        (docs/01 D8) is checked at import time; 'cuda' on a
+                        box without CUDA fails before the model is loaded.
     KITTENTTS_DECODER   Audio decoder name from the model repository.
                         Unset keeps the repository default ('default', the
                         stock flow).  'student_w4' is a distilled, quantised
@@ -105,6 +111,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     stage_audio,
     temp_audio_dir,
     validate_language_code,
@@ -115,7 +123,8 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("KITTENTTS_MODEL", "KittenML/kitten-tts-2")
-DEVICE_SETTING = os.getenv("KITTENTTS_DEVICE", "auto").strip().lower()
+DEVICE_ENV = "KITTENTTS_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "auto").strip().lower()
 
 # Decoder / weight-pack overrides; empty means "the repository's own default"
 # (config.json's default_decoder / default_weights).  Decoder *names* are
@@ -124,16 +133,49 @@ DEVICE_SETTING = os.getenv("KITTENTTS_DEVICE", "auto").strip().lower()
 DECODER = os.getenv("KITTENTTS_DECODER", "").strip()
 WEIGHTS = os.getenv("KITTENTTS_WEIGHTS", "").strip().lower()
 
-_SUPPORTED_DEVICES = ("auto", "cuda", "mps", "cpu")
 _SUPPORTED_WEIGHTS = ("", "packed", "emb4", "full")
+
+# What this engine can serve.  Grammar rules are shared (docs/01 D8); this
+# replaces the old membership tuple, which could not name the families the
+# engine speaks in the engine's own order.
+#
+# 'cuda:<index>' is rejected on purpose, even though the language model itself
+# would happily take one (kittentts2.model._resolve_device returns the string
+# verbatim).  The *transcriber* does not: speaker.py::Whisper._choose_device
+# asks `if self.device != "cuda": return "cpu"`, so 'cuda:1' silently moves the
+# on-the-fly reference-clip transcription to the CPU -- slower, and per the
+# engine's own warning a different transcript and therefore a different cloned
+# voice.  A syntax that works for one subsystem and silently degrades another
+# is worse than no syntax: use CUDA_VISIBLE_DEVICES=1 to pin the GPU.
+DEVICE_FAMILIES = ("auto", "cuda", "mps", "cpu")
+DEVICE_ALLOW_INDEX = False
+DEVICE_SPEC = parse_device(
+    DEVICE_SETTING,
+    env_var=DEVICE_ENV,
+    families=DEVICE_FAMILIES,
+    allow_index=False,
+    note="the engine's transcriber compares the device to the literal 'cuda'; "
+    "pin a GPU with CUDA_VISIBLE_DEVICES",
+)
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    'auto' is the engine's own CUDA-else-CPU pick, so nothing to check there;
+    an explicit 'cuda:N' is an instruction, and torch would only notice the
+    ordinal is missing once the weights are already loaded.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
-    if DEVICE_SETTING not in _SUPPORTED_DEVICES:
-        raise ValueError(
-            f"KITTENTTS_DEVICE must be one of {_SUPPORTED_DEVICES}, got {DEVICE_SETTING!r}"
-        )
     if WEIGHTS not in _SUPPORTED_WEIGHTS:
         raise ValueError(
             "KITTENTTS_WEIGHTS must be empty (repository default), or one of "
@@ -469,6 +511,7 @@ def _get_runtime() -> KittenTTSRuntime:
     """Return the global runtime, loading the model once on first call."""
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading KittenTTS model '{}' on device '{}' (first run downloads "
             "from HuggingFace) ...",

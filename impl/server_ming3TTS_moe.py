@@ -50,6 +50,9 @@ Configuration (environment variables):
     MING3_TTS_MOE_DEVICE   Torch device to load the model on: 'cuda',
                            'cuda:N', 'cpu', or 'mps'.  Only CUDA is tested
                            (the engine's runtime env is CUDA-oriented).
+                           The shared grammar (docs/01 D8) is checked at
+                           import time; a CUDA request this box cannot serve
+                           fails before the checkpoint is loaded.
                            Default: cuda
     MING3_TTS_MOE_HOST     Bind host for `python server_ming3TTS_moe.py`.
                            Default: 0.0.0.0
@@ -85,7 +88,6 @@ import io
 import math
 import os
 import random
-import re
 import threading
 import time
 import uuid
@@ -135,6 +137,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     temp_audio_dir,
     write_temp_audio,
 )
@@ -144,7 +148,8 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("MING3_TTS_MOE_MODEL", "inclusionAI/Ming-3.0-tts-tiny")
-DEVICE = os.getenv("MING3_TTS_MOE_DEVICE", "cuda")
+DEVICE_ENV = "MING3_TTS_MOE_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # The engine enforces 44100 as part of its release-contract validation
 # (ming_tiny.task_protocol.validate_release_engine), so this constant is
@@ -182,21 +187,36 @@ SEED_LANGUAGE_CODES = ("zh", "en")
 MULTILINGUAL_LANGUAGE_CODES = ("de", "es", "fr", "ja", "ko")
 LANGUAGE_CODES = SEED_LANGUAGE_CODES + MULTILINGUAL_LANGUAGE_CODES
 
-_DEVICE_PATTERN = re.compile(r"^(cuda(:\d+)?|cpu|mps)$")
+# What this engine can serve; the grammar rules are shared (docs/01 D8), so
+# this is capability data rather than a second copy of the 0.5b server's
+# regex (the two copies had already drifted from Audio8's).  No 'auto': the
+# engine's release contract configures the runtime itself, and a device picked
+# here would be the server guessing.
+DEVICE_FAMILIES = ("cuda", "cpu", "mps")
+DEVICE_ALLOW_INDEX = True
+# Import-time grammar check: a malformed value raises a ValueError naming
+# MING3_TTS_MOE_DEVICE before this module finishes importing.
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    # Grammar check only (VoxCPM-style): the engine checks availability at
-    # load time; only CUDA is tested.
-    if not _DEVICE_PATTERN.fullmatch(DEVICE):
-        raise ValueError(
-            "MING3_TTS_MOE_DEVICE must be 'cuda', 'cuda:N', 'cpu', or 'mps', "
-            f"got {DEVICE!r}"
-        )
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
 
-
-_validate_config()
+    Import time only proved the *spelling*; whether GPU N exists is about the
+    machine, and torch finds out long after the checkpoint was fetched --
+    from_pretrained(device=...) loads it, and only then does the move to the
+    device fail.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 
 def _task_for_language(code: str) -> str:
@@ -477,6 +497,7 @@ def _get_runtime() -> MingTinyTTSRuntime:
     """
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading Ming-3.0-tts MoE model '%s' on device '%s' ...",
             MODEL_NAME_OR_PATH,

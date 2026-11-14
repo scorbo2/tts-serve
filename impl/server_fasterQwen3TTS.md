@@ -77,7 +77,18 @@ python impl/server_fasterQwen3TTS.py
 
 ### Run on a different device
 
-This engine only supports `cuda`!
+This engine only supports `cuda`! There is no CPU or MPS backend, so
+`FASTER_QWEN3TTS_DEVICE` accepts `cuda` and an indexed `cuda:<index>` —
+anything else is a startup error naming the variable, not a silent fallback:
+
+```
+export FASTER_QWEN3TTS_DEVICE=cuda:1
+python impl/server_fasterQwen3TTS.py
+```
+
+An index this box does not have is refused when the model loads, before the
+checkpoint is read (and before the CUDA-graph capture, which is the expensive
+part of startup on this engine).
 
 
 

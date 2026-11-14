@@ -127,6 +127,15 @@ python impl/server_omnivoice.py
 
 export OMNIVOICE_DEVICE=mps
 python impl/server_omnivoice.py
+
+export OMNIVOICE_DEVICE=cuda:1
+python impl/server_omnivoice.py
 ```
+
+An indexed CUDA device (`cuda:1`) is accepted — a second GPU is addressable.
+A value that is not a device (`cuda-ish`) is a startup error naming
+`OMNIVOICE_DEVICE`; an index this box does not have is refused when the model
+loads, before any weights are downloaded. `GET /capabilities` reports the
+configured string in either case.
 
 
