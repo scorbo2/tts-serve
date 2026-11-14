@@ -49,6 +49,11 @@ Configuration (environment variables):
     FASTER_QWEN3TTS_DEVICE    CUDA device to load the model on: 'cuda' or
                               'cuda:N' for a specific GPU.  Must be a CUDA
                               device (the engine has no CPU/MPS backend).
+                              The shared grammar (docs/01 D8) is checked at
+                              import time -- junk is a startup ValueError, not
+                              a torch error mid-load -- and a GPU index this
+                              box does not have fails before the checkpoint is
+                              read.
                               Default: cuda
     FASTER_QWEN3TTS_HOST      Bind host for `python server_fasterQwen3TTS.py`.
                               Default: 0.0.0.0
@@ -87,12 +92,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from faster_qwen3_tts import FasterQwen3TTS
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    canonical_language_codes,
+    canonical_language_literal,
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     stage_audio,
     temp_audio_dir,
 )
@@ -102,7 +113,38 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("FASTER_QWEN3TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-DEVICE = os.getenv("FASTER_QWEN3TTS_DEVICE", "cuda")
+DEVICE_ENV = "FASTER_QWEN3TTS_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
+
+# CUDA-only: the CUDA-graph backend hard-rejects anything else at load.  The
+# old check was `DEVICE.startswith("cuda")` -- 'cuda-ish' passed it and torch
+# noticed later, during the load (docs/01 D8).
+DEVICE_FAMILIES = ("cuda",)
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(
+    DEVICE_SETTING,
+    env_var=DEVICE_ENV,
+    families=DEVICE_FAMILIES,
+    note="faster-qwen3-tts has no CPU/MPS backend",
+)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the runtime, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    The engine captures CUDA graphs for one device at load; naming a GPU this
+    box does not have must not survive until then.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 # The 12 Hz codec is tokens/s, not the waveform rate: generated audio is
 # 24 kHz (the engine infers it from the model and echoes it back in every
@@ -141,20 +183,10 @@ LANGUAGE_CODE_TO_NAME = {
 }
 LANGUAGE_CODES = tuple(LANGUAGE_CODE_TO_NAME)
 
-
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    # The CUDA-graph backend hard-rejects non-CUDA devices at load time; the
-    # prefix (rather than an exact 'cuda') also allows multi-GPU selection
-    # like 'cuda:1'.
-    if not DEVICE.startswith("cuda"):
-        raise ValueError(
-            f"FASTER_QWEN3TTS_DEVICE must be a CUDA device ('cuda' or "
-            f"'cuda:N'); faster-qwen3-tts has no CPU/MPS backend, got {DEVICE!r}"
-        )
-
-
-_validate_config()
+# The device grammar is this server's only import-time config check, and
+# parse_device() already made it (docs/01 D8): a malformed
+# FASTER_QWEN3TTS_DEVICE raised a ValueError naming the variable before this
+# module finished importing.
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -162,8 +194,10 @@ _validate_config()
 
 # Dynamic Literal over the Base checkpoint's language codes (+ the engine's
 # 'auto' auto-detection sentinel) so the request schema and the
-# /capabilities enum share one source.
-Language = Literal[("auto", *LANGUAGE_CODES)]
+# /capabilities enum share one source.  Built via the shared helper to pin
+# canonical order; see tts_engine_common.canonical_language_literal for
+# why that pinning matters.
+Language = canonical_language_literal(LANGUAGE_CODES, auto=True)
 
 
 class SynthesisRequest(BaseModel):
@@ -303,10 +337,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["faster-qwen3-tts"] = "faster-qwen3-tts"
     model: str = MODEL_NAME_OR_PATH
     device: str = DEVICE
@@ -336,7 +373,7 @@ CAPABILITIES = build_capabilities(
             "start of the output."
         ),
     },
-    languages=sorted(LANGUAGE_CODES),
+    languages=list(canonical_language_codes(LANGUAGE_CODES)),
     overrides={
         "temperature": {"step": 0.05},
         "top_p": {"step": 0.01, "advanced": True},
@@ -371,7 +408,7 @@ app = FastAPI(
         "transcript) and get back cloned speech.  Machine-readable parameter "
         "metadata at GET /capabilities."
     ),
-    version="0.3.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 
@@ -414,6 +451,7 @@ def _get_runtime() -> FasterQwen3TTSRuntime:
     """
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading faster-qwen3-tts model '%s' on device '%s' ...",
             MODEL_NAME_OR_PATH,

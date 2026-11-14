@@ -24,6 +24,11 @@ More information:
 - [LuxTTS](server_luxTTS.md)
 - [VoxCPM](server_voxcpm.md)
 - [Breeze TTS 2](server_breezeBlue.md)
+- [Ming 3 TTS (0.5b)](server_ming3TTS.md)
+- [Ming 3 TTS (MoE)](server_ming3TTS_moe.md)
+- [Pocket TTS](server_pocketTTS.md)
+- [Audio8 TTS (Realistic Air)](server_audio8TTS.md)
+- [KittenTTS 2](server_kittenTTS.md)
 
 
 ## Running
@@ -51,6 +56,11 @@ format differs map it at their own server — the client never sees it:
 Engines with auto-detection expose it as the special value `auto`
 (Qwen3-TTS, Qwen3-TTS (MLX), faster-qwen3-tts, dots.tts).
 
+**Ming 3 TTS** (both servers) needs no mapping table: the engine accepts the
+two-letter codes as-is. Like IndexTTS-2.5, only the advertised codes pass
+validation, and neither Ming task offers auto-detection, so there is no
+`auto`.
+
 **LuxTTS** and **Breeze TTS 2** are the no-support case: the engine has no
 language parameter at all (LuxTTS's tokenizer auto-detects English and
 Chinese per text segment; Breeze is bilingual and auto-detects from the
@@ -58,7 +68,39 @@ input text), so the server accepts any well-formed two-letter code for API
 consistency, does not forward it, and advertises `languages: null` in
 capabilities.
 
+**Pocket TTS** is a single-language-per-instance engine: the model is chosen
+at startup (`POCKET_TTS_MODEL`, or a custom config via `POCKET_TTS_CONFIG`
+for community/offline checkpoints), so the server accepts any well-formed
+two-letter code, does not forward it, and advertises `languages: null` in
+capabilities (the no-support case) — the loaded checkpoint shows up in the
+`model` label.
+
+**Audio8 TTS** is the same no-support case with the opposite deployment
+shape: one checkpoint speaks 23 languages and picks the language from the
+input text, so there is nothing to forward and nothing to select at startup.
+The server accepts any well-formed two-letter code, never forwards it, and
+advertises `languages: null`.
+
+**KittenTTS 2** is also the no-support case, with a twist: the language is
+carried by the *speaker* — the engine has no language parameter, and its
+115 built-in voices include non-English ones named after their language
+(`German`, `Arabic`, ...). The server accepts any well-formed two-letter
+code, does not forward it, and advertises `languages: null`.
+
 ## Engine-specific notes
+
+- **Pocket TTS** — CPU-only, 24 kHz. Reference audio is **optional**: the
+  voice is `audio_base64` (zero-shot clone; needs the gated weights, else a
+  `400`), else a preset `voice`, else the loaded language's default preset;
+  clip + preset together is a `422`. No `reference_text` field (the engine
+  has no use for a transcript). One instance serves one language
+  (`POCKET_TTS_MODEL`, or `POCKET_TTS_CONFIG` for community/offline YAML
+  checkpoints — mutually exclusive; presets `422` with a custom config);
+  `language` is accepted but not forwarded. `seed` is
+  meaningful and reproducible on CPU. Conditioned voice states are cached
+  per clip hash / preset (LRU of 8). Synthesis is serialized with a lock:
+  `generate_audio()` is not thread-safe and the sampler uses the global
+  torch RNG.
 
 - **Chatterbox** — no `reference_text` field: it conditions purely on the
   reference audio. Output is PerTh-watermarked by the library itself. Only the
@@ -116,10 +158,17 @@ capabilities.
   every request pays the ASR cost, and the first request after startup also
   pays a one-time librosa initialisation (~10 s). No `language` forwarding:
   the engine's tokenizer auto-detects English and Chinese per segment
-  (other scripts are dropped). `seed` is meaningful (solver initial noise
-  from the PyTorch RNG): bit-identical output on CPU, near-identical on
-  CUDA (non-deterministic GPU kernels). The runtime demands a file path for
-  prompt audio,
+  (other scripts are dropped). The engine's two "nothing to speak" crashes
+  are pre-flighted: text the tokenizer empties (`...`, `1234`, Markdown
+  fences, emoji, Cyrillic/Japanese/Korean text) is a **422**, and a reference
+  clip whose transcribable window — the first `prompt_duration` seconds, not
+  the whole clip — yields no Whisper transcript is a **400**; both checks run
+  under the synthesis lock. See
+  [server_luxTTS.md](server_luxTTS.md#nothing-to-speak) for the measured
+  tokenizer table and the reference-clip gotchas. `seed` is meaningful (solver
+  initial noise from the PyTorch RNG): bit-identical output on CPU,
+  near-identical on CUDA (non-deterministic GPU kernels). The runtime demands
+  a file path for prompt audio,
   so the server writes a temp file; the reference is one-shot (no engine
   prompt cache), so the file is deleted per request. Synthesis is serialized
   with a lock: `generate_speech()` mutates the shared vocoder's `return_48k`
@@ -162,6 +211,71 @@ capabilities.
   with a lock (shared KV/codec state; the engine's own API is single-request).
   `BREEZEBLUE_FAST_ALL=1` enables the CUDA-graph fast path (one-time warmup
   from the engine repo's `configs/fast.json`, ~14.4 GiB vs ~7.7 GiB eager).
+- **Ming 3 TTS** — 44.1 kHz output (new rate; the engine family's audio VAE
+  rate). The checkpoint comes in two flavors with **conflicting dependency
+  pins**, so there are two servers in two environments: `server_ming3TTS.py`
+  (0.5b dense, `ming_tts`) and `server_ming3TTS_moe.py` (7.9B MoE that the
+  engine confusingly calls "tiny", `ming_tiny`). The engine is a bare git
+  repo — both servers need the repo root on `PYTHONPATH` (guarded import
+  with an actionable startup message). `language` codes (`zh,en,ja,ko,de,fr,es`)
+  are passed verbatim — no server-side mapping — and there is no `auto`.
+  The 0.5b server treats `reference_text` as an optional refinement
+  (omitted = speaker-embedding-only fallback, Qwen3-TTS convention) and
+  keeps content-hashed staged clips on disk (the engine caches encoded
+  prompts per path **in memory**; same-seed requests reproduce each other
+  once the clip's prompt is warm, the cold first request only after a
+  server restart — server-side `seed_everything` inside the lock). The MoE server is
+  ICL-only: `reference_text` is **required** (422, Qwen3-TTS MLX
+  convention), the `seed`/`multilingual` engine task is selected from the
+  language code, the seed goes to `generate()` (the engine seeds itself),
+  temp clip files are deleted per request, and the response carries an
+  extra `stopped` flag (false = possibly truncated). Sampler defaults come
+  from the engine's `ming_tiny.task_protocol` `FORMAL_*` constants — the
+  test stub mirrors them; keep them in sync.
+- **Audio8 TTS (Realistic Air)** — 44.1 kHz output. The only engine here with
+  **no package to install**: the checkpoint carries its own transformers
+  modelling/processor code (`trust_remote_code=True`), so the server imports
+  `AutoModel`/`AutoProcessor` and nothing engine-specific — the test stand-in
+  is the `transformers` stub, and there is no `audio8_*` stub to write. Do
+  not import the repo's `audio8_tts_infer.py` CLI: its prompt cache is keyed
+  by text alone and would leak one clip's voice into the next request. The
+  clip and its **exact** transcript are one unit (`reference_text` is
+  mandatory with `audio_base64`, invalid without it — both halves 422); no
+  ASR of any kind, and no reference at all means the checkpoint's own voice.
+  The model's single 2048-position text+audio context is why the clip window
+  is 2–20 s and the text cap 1500 characters, why nothing is ever truncated,
+  and why an over-budget prompt is a measured 400 rather than an engine
+  ValueError. The window is enforced on the **decoded** samples (a container
+  header is only an advertisement — a clip whose header and audio disagree by
+  over 0.5 s is a 400), which is why an MP3 with no `Xing`/`Info`/`VBRI`
+  length table is refused too: without one, libsndfile guesses the duration
+  from the first frame and stops there (measured: a 40 s VBR MP3 read back as
+  6.7 s). `max_new_tokens` counts audio *frames* (~21.5/s of audio); the server
+  clamps it and `retry_max_new_tokens` to the context the prompt leaves over —
+  exactly as the engine does — and it rejects (400) a prompt that leaves under
+  256 frames (~12 s) over, because the engine would otherwise answer with a
+  single 46 ms frame and call it `finished` (measured). `retry_max_new_tokens` mirrors the CLI's one
+  retry; the response carries an extra `finished` flag (false = ran out of
+  budget). No temp files: the processor takes in-memory samples. Synthesis is
+  serialized (the model's `_setup_generation_caches` rewrites caches on its
+  own instance).
+- **KittenTTS 2** — 24 kHz. 1.7B-parameter 1-bit speech LM with two speaker
+  sources: `voice` (one of the checkpoint's 115 built-in voices — unknown
+  names get a runtime `422`, the table is checkpoint data so it is not a
+  capabilities enum) or `audio_base64` zero-shot cloning; the two together
+  are a `422` (the engine treats them as mutually exclusive). With neither,
+  the checkpoint's default voice (`Bruno`) speaks, so `reference_audio` is
+  optional in capabilities. `reference_text` is optional — omitting it
+  triggers an on-the-fly Whisper transcription that runs in English mode
+  (send the transcript for non-English clips); a transcript without a clip
+  is a `422`. Clips are staged content-hashed and **kept** (the engine
+  caches the encoded clip and embedding per path). Expression control
+  lives inside `text` (`[emotion]` / `<event>` / `(((emphasis)))`, engine:
+  early beta) plus `preset` (`stable`/`expressive`) and raw sampler knobs.
+  No `language` forwarding (the voice carries the language). `seed` is
+  meaningful (bit-exact on CPU, near-exact on CUDA). Synthesis is serialized
+  with a lock (shared pending-speaker-embedding state). The server refuses
+  legacy ONNX checkpoints at startup (different engine API).
 
 ## Tests (`tests/`)
 
@@ -191,13 +305,29 @@ What is covered:
   (stubbed runtime, empty generator).
 - The `/synthesize` success path with a fake model — pins what the server
   forwards to the engine: faster-qwen3-tts (the `xvec_only` mode flag and
-  transcript handling) and Breeze TTS 2 (request dict, template selection,
-  guidance kwargs, seed/request-id forwarding); real audio generation is
-  still out of scope.
+  transcript handling), Breeze TTS 2 (request dict, template selection,
+  guidance kwargs, seed/request-id forwarding), and both Ming 3 TTS servers
+  (engine task/knob forwarding, seed handling — server-side re-seeding on
+  the 0.5b, engine-side on the MoE — and staged-file kept vs deleted per
+  request); real audio generation is still out of scope.
+- Cross-server contract tests, one file per contract, run against every
+  `impl/server_*.py` registered in that file's list (`SERVERS` /
+  `SERVER_MODULES`) — a new engine that skips the registration is covered by
+  none of them, so the registration step is part of adding an engine.
+  `test_language_contract.py` (docs/02), `test_versioning_contract.py`
+  (`RELEASE_VERSION` in `/health`, `schema_version` in `/capabilities`), and
+  `test_device_contract.py` (docs/01 D8: the device string is parsed by the
+  shared grammar, the engine's own family set is declared as data, and the
+  "does this GPU exist" check runs in the load path before the checkpoint —
+  that file also globs `impl/server_*.py` and fails on an unregistered
+  server). The device test's grammar cases import each server in a **fresh
+  subprocess** with the device variable overridden, because the in-process
+  suite pins that variable (`tests/_bootstrap.py`) and the grammar runs at
+  import.
 
 What is *not* covered: actual synthesis (needs a real model + GPU).  The
 `/synthesize` success path is exercised only where a test installs a fake
-model (faster-qwen3-tts and Breeze TTS 2).
+model (faster-qwen3-tts, Breeze TTS 2, Ming 3 TTS ×2).
 
 ### Snapshots
 
@@ -207,11 +337,12 @@ Regenerate after changing a server's request schema (or engine constants):
 python tests/update_snapshots.py
 ```
 
-Then review the diff. The dots.tts and IndexTTS-2.5 snapshots record the
-`device` observed on the generating machine; their tests compare everything
-except `device` (machine-dependent — the runtime auto-selects) and only
-assert the value is a sane one (`cuda`/`cpu` for dots.tts;
-`cuda`/`cpu`/`mps`/`xpu` for IndexTTS-2.5).
+Then review the diff. The dots.tts, IndexTTS-2.5 and KittenTTS snapshots
+record the `device` observed on the generating machine; their tests compare
+everything except `device` (machine-dependent — the runtime auto-selects)
+and only assert the value is a sane one (`cuda`/`cpu` for dots.tts and
+KittenTTS — the torch backend has no auto-MPS; `cuda`/`cpu`/`mps`/`xpu` for
+IndexTTS-2.5).
 
 ### Gotchas
 

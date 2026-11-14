@@ -10,6 +10,8 @@ re-interprets) it differently.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from typing import Any, Literal
 
 # Convention (docs/02): a null or empty ``language`` means English.
 DEFAULT_LANGUAGE = "en"
@@ -66,3 +68,57 @@ def validate_language_code(value: str, *, allow_auto: bool = False) -> str:
         f"language must be a two-letter lowercase code like 'en' or 'fr'"
         f"{extra}, got {value!r}"
     )
+
+
+def canonical_language_codes(codes: Iterable[str], *, auto: bool = False) -> tuple[str, ...]:
+    """Canonical member order for a fixed-enum ``language`` contract.
+
+    Single ordering oracle: dedupes, rejects malformed tables at import
+    time, and returns ``'auto'`` first (only when the engine offers the
+    auto-detection sentinel) then the sorted codes.  Servers must feed BOTH
+    halves of their advertised contract through it: the request ``Literal``
+    (via ``canonical_language_literal``) and the ``languages`` list handed
+    to ``build_capabilities`` — so neither half can drift into declaration
+    order, and ``test_capabilities_languageEnum_advertisedInCanonicalSortedOrder``
+    (which derives its expectation from the capabilities document itself)
+    can trust them to agree.
+
+    Why pinning the order matters at all: CPython compares/hashes
+    ``Literal[...]`` by the **frozenset** of its args, so pydantic's core-
+    schema cache conflates same-code-set Literals and whichever model
+    builds its JSON schema first supplies the enum for *all* of them —
+    silently reordering another server's advertised ``/capabilities`` enum
+    (this shipped once: the MoE Ming snapshot carried the 0.5b server's
+    code order).  With every server pinned to this order, a collision can
+    no longer change anything observable.
+
+    Raises ValueError at import time for an empty code list or anything
+    that is not a two-letter lowercase code — a typo'd engine table should
+    fail at startup, not when a client reads /capabilities.  Pass the
+    auto-detection sentinel via ``auto=`` rather than hiding it in
+    ``codes``; the advertised ``languages`` list deliberately excludes
+    ``'auto'`` (docs/02), so call without the flag for that half.
+    """
+    ordered = sorted(set(codes))
+    if not ordered:
+        raise ValueError("canonical_language_codes needs at least one code")
+    invalid = [code for code in ordered if not is_language_code(code)]
+    if invalid:
+        raise ValueError(
+            f"language codes must be two-letter lowercase like 'en'/'fr' "
+            f"(pass 'auto' via auto=, never in codes); got {invalid}"
+        )
+    return ("auto", *ordered) if auto else tuple(ordered)
+
+
+def canonical_language_literal(codes: Iterable[str], *, auto: bool = False) -> Any:
+    """Build the ``Literal`` type for a fixed-enum ``language`` request field.
+
+    Every server with an enum-based language field must build its
+    ``Language`` type through this helper rather than a hand-rolled
+    ``Literal[tuple(...)]``; the members are exactly
+    ``canonical_language_codes(codes, auto=auto)``, whose docstring carries
+    the pydantic Literal-cache-collision lore that makes the pinning
+    mandatory.
+    """
+    return Literal[canonical_language_codes(codes, auto=auto)]

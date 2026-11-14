@@ -110,6 +110,10 @@ def test_health(client):
     assert body["serverType"] == "Qwen3-TTS-MLX"
     assert body["device"] == "mlx"
     assert body["model"] == srv.MODEL_NAME_OR_PATH
+    # The tts-serve release version comes from the single shared constant;
+    # pinning to srv.RELEASE_VERSION (not a literal) keeps this release-proof
+    # while still catching a server that forgot to wire it in.
+    assert body["version"] == srv.RELEASE_VERSION
 
 
 def test_root_landing_page(client):

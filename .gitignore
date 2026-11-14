@@ -11,3 +11,7 @@ venv/
 
 .venv-mlx/
 venv-mlx/
+
+# per-engine uv environments (envs/<engine>/): the .venv is covered above;
+# lockfiles are machine- and checkout-specific
+envs/*/uv.lock

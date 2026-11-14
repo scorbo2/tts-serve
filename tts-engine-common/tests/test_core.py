@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tts_engine_common.core import compute_rtf, decode_base64
+from tts_engine_common.core import RELEASE_VERSION, SCHEMA_VERSION, compute_rtf, decode_base64
 
 
 class TestDecodeBase64:
@@ -71,3 +71,45 @@ class TestComputeRtf:
 
         # THEN the factor is uncomputable:
         assert rtf is None
+
+
+class TestReleaseVersion:
+    def test_releaseVersion_matchesGitTagForm(self) -> None:
+        # GIVEN the single release-version constant (git tags carry no 'v'
+        # prefix: "1.4", not "v1.4"):
+        # WHEN split into dotted segments,
+        # THEN every segment is numeric and there are at least two:
+        segments = RELEASE_VERSION.split(".")
+        assert len(segments) >= 2
+        assert all(segment.isdigit() for segment in segments)
+
+    def test_releaseVersion_isDistinctFromPackageVersion(self) -> None:
+        # GIVEN the tts-serve release line and the tts-engine-common package
+        # version — two independent numbers (the shared package is versioned
+        # on its own schedule and historically stays at 0.1.0):
+        import tts_engine_common
+
+        # WHEN compared,
+        # THEN they are different constants and the package version is
+        # never used as the release line by accident:
+        assert RELEASE_VERSION != tts_engine_common.__version__
+
+    def test_releaseVersion_isNotTheSchemaVersion(self) -> None:
+        # GIVEN the release line (str, bumped every release) and the
+        # capabilities contract version (int, bumped only on breaking
+        # changes) — a client gates on SCHEMA_VERSION, never on the
+        # release line:
+        # WHEN compared,
+        # THEN they are different types and never conflated:
+        assert isinstance(RELEASE_VERSION, str)
+        assert isinstance(SCHEMA_VERSION, int)
+
+    def test_releaseVersion_isExportedFromPackageRoot(self) -> None:
+        # GIVEN the package root's public API:
+        import tts_engine_common
+
+        # WHEN inspected,
+        # THEN RELEASE_VERSION is importable from the root and listed in
+        # __all__, so servers never reach into submodules for it:
+        assert tts_engine_common.RELEASE_VERSION == RELEASE_VERSION
+        assert "RELEASE_VERSION" in tts_engine_common.__all__

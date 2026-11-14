@@ -48,6 +48,45 @@ Start it up!
 python impl/server_chatterbox.py
 ```
 
+### Alternative: from a local Chatterbox git checkout (uv)
+
+[`uv`](https://docs.astral.sh/uv/) can build a venv dedicated to this server
+that installs Chatterbox straight from a git checkout. Nothing is installed
+globally. Clone Chatterbox next to tts-serve:
+
+```
+git clone https://github.com/resemble-ai/chatterbox
+git clone https://github.com/scorbo2/tts-serve
+cd tts-serve
+python3 tools/serve.py chatterbox
+```
+
+The launcher (`tools/serve.py`, stdlib-only, Python 3.11+) builds
+`envs/chatterbox/.venv` from
+[`envs/chatterbox/pyproject.toml`](../envs/chatterbox/pyproject.toml) on first
+use, then starts the server. On later starts it re-runs `uv sync` only when
+the env's pyproject, its `.python-version`, or the Chatterbox checkout's
+`pyproject.toml` has changed. Use `--sync` to force a sync, `--port N` to run
+on a port other than 7500 (it sets `CHATTERBOX_PORT`), `--host 127.0.0.1` for a
+local-only server (it sets `CHATTERBOX_HOST`), and `--list` to see each env's
+status. By hand, it's `uv sync --project envs/chatterbox`, then
+`envs/chatterbox/.venv/bin/python impl/server_chatterbox.py`.
+
+- Chatterbox and `tts-engine-common` are installed editable, so after a
+  `git pull` in either one you only need to restart the server.
+- If your Chatterbox checkout isn't next to tts-serve, edit the `chatterbox-tts`
+  path under `[tool.uv.sources]` in `envs/chatterbox/pyproject.toml`.
+- The environment variables below (`CHATTERBOX_PORT`, `CHATTERBOX_DEVICE`, ...)
+  work unchanged.
+- Torch: Chatterbox pins torch 2.6.0. That pin is kept on x86_64 Linux, where
+  PyPI's wheels include CUDA, and on macOS. Linux on aarch64 (e.g. NVIDIA GB10 /
+  DGX Spark, Jetson Thor, GH200) has no CUDA build of 2.6.0, so there it gets
+  CUDA torch 2.9.1 from the cu130 index instead.
+- Besides the model weights, the first start also downloads a small
+  spaCy/pkuseg segmentation model to `~/.pkuseg/`. The engine does this itself.
+- The design behind `envs/` is in
+  [`docs/04-engine-environments.md`](../docs/04-engine-environments.md).
+
 ### Changing host
 
 By default, `0.0.0.0` is used. To force a local-only server:
@@ -88,5 +127,24 @@ python impl/server_chatterbox.py
 export CHATTERBOX_DEVICE=mps
 python impl/server_chatterbox.py
 ```
+
+Accepted values are `cuda`, `mps`, and `cpu` — **not** `cuda:1`. Chatterbox
+takes a device *family* and keys its own loader decisions on that string, so an
+index is not a documented input here; the risk of accepting it is a subsystem
+silently landing on a different GPU, which is worse than a refused start. To
+pick which GPU Chatterbox gets, pin it with the CUDA environment instead:
+
+```
+export CUDA_VISIBLE_DEVICES=1
+export CHATTERBOX_DEVICE=cuda
+python impl/server_chatterbox.py
+```
+
+A missing GPU is deliberately **not** checked at the server boundary: this
+engine's own loader decides what to do when the requested family is not there,
+and a server-side guard would only pre-empt a fallback that works. If the
+device in `GET /capabilities` doesn't match what you expect, check which card
+the process really got (the configured string is echoed verbatim, never the
+resolved one).
 
 

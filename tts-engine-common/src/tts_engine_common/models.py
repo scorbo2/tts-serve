@@ -1,4 +1,4 @@
-"""Pydantic models for the /capabilities document and the frozen response core."""
+"""Pydantic models for the /capabilities document and the frozen response/health cores."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .core import SCHEMA_VERSION
+from .core import RELEASE_VERSION, SCHEMA_VERSION
 
 
 class ParamSpec(BaseModel):
@@ -152,3 +152,39 @@ class CoreSynthesisResponse(BaseModel):
     @classmethod
     def _sanitize_time_used(cls, value: Any) -> Any:
         return 0.0 if _is_nonfinite(value) else value
+
+
+class CoreHealthResponse(BaseModel):
+    """Frozen /health core shared by every engine server.
+
+    Engine servers subclass this and override only ``serverType`` with their
+    ``Literal`` label (the way engines subclass ``CoreSynthesisResponse`` and
+    add extras).  Everything else is uniform by construction:
+
+    * ``model`` / ``device`` stay plain ``str`` in the base because the
+      per-server values are import-time constants (``MODEL_NAME_OR_PATH``,
+      ``DEVICE``), not fixed literals.
+    * ``version`` carries the single ``RELEASE_VERSION`` constant — the old
+      per-server ``version="0.x.y"`` stamps that drifted between 0.1.0 and
+      0.3.0 and matched no release anyone could name are gone; one bump in
+      ``core.RELEASE_VERSION`` moves every server's /health at once.  It is
+      deliberately *not* the ``schema_version`` advertised by /capabilities
+      (see the version-bump skill for why those two numbers are independent).
+    """
+
+    status: Literal["ok"] = "ok"
+    serverType: str = Field(
+        ...,
+        min_length=1,
+        description="Engine label this server speaks, e.g. 'Chatterbox'. Override with a Literal.",
+    )
+    model: str = Field(..., description="Model identifier/checkpoint in use.")
+    device: str = Field(..., description="Inference device, e.g. 'cuda', 'mps', 'cpu', 'mlx'.")
+    version: str = Field(
+        RELEASE_VERSION,
+        description=(
+            "tts-serve release version (see the README changelog).  Not to be "
+            "confused with schema_version in GET /capabilities, which tracks "
+            "the client contract and changes only on breaking changes."
+        ),
+    )

@@ -1,6 +1,6 @@
 ---
 name: new-tts-engine
-description: Use when adding a new TTS engine to tts-serve — writing a new impl/server_<name>.py, its import-only stub in impl/tests/stubs/, its test file, and the snapshot/_bootstrap/README registration. Covers the engine-research checklist and the exact file structure to follow.
+description: Use when adding a new TTS engine to tts-serve — writing a new impl/server_<name>.py, its import-only stub in impl/tests/stubs/, its test file, the snapshot/_bootstrap/README registration, and (when useful) an envs/<engine>/ uv environment for tools/serve.py. Covers the engine-research checklist and the exact file structure to follow.
 ---
 
 # Adding a new TTS engine
@@ -11,8 +11,12 @@ Workflow for wrapping a new open-source TTS engine as a tts-serve FastAPI server
 Canonical references — copy their structure exactly, adapt only where the new engine
 forces you to: `impl/server_chatterbox.py` (standard case; engine speaks codes natively),
 `impl/server_qwen3TTS.py` (code → name mapping table), `impl/server_dotsTTS.py`
-(auto-device, code + `auto` mapping, 48 kHz variant), `impl/tests/test_server_chatterbox.py`,
-`impl/tests/stubs/chatterbox/`. General repo conventions live in `AGENTS.md` — read it first.
+(auto-device, code + `auto` mapping, 48 kHz variant), `impl/server_luxTTS.py` (no language
+forwarding, `languages=None`, one-shot temp file), `impl/tests/test_server_chatterbox.py`,
+`impl/tests/stubs/chatterbox/`. For the optional uv environment (Phase 6):
+`envs/chatterbox/pyproject.toml` (engine pins a PyPI torch, no index settings of its own) and
+`envs/omnivoice/pyproject.toml` (engine declares its own CUDA indexes). General repo
+conventions live in `AGENTS.md` — read it first.
 
 ## Phase 1 — Research the new engine
 
@@ -30,16 +34,23 @@ entry point (and any demo app). Extract:
 | Language table | The API contract is fixed — two-letter lowercase codes, null/empty → `en` (docs/02). This decides only *how the server adapts*: engine keyed by codes (Chatterbox) → `Literal` over its codes; engine speaks a different format (Qwen3 lowercase names, dots.tts uppercase) → private code → engine-value mapping table, `Literal` over the *codes*; no table / free-form (OmniVoice, ~646 langs) → `str \| None` + `validate_language_code` after-validator (pass `allow_auto=True` if the engine offers auto-detection), `languages=None` in capabilities. See "Language contract" below |
 | Audio constraints | minimum usable duration (→ `MIN_PROMPT_DURATION_S`), truncation behavior (e.g. Chatterbox's first-10 s), does it demand a **file path** for prompt audio? |
 | Thread safety | shared mutable model state between calls? → needs a `_synthesis_lock` (see the comment in `server_chatterbox.py`) |
-| Device support | explicit cuda/mps/cpu arg (→ `<NAME>_DEVICE` env var) vs auto-select (→ mirror `torch.cuda.is_available()` like dots.tts; no env var, and the snapshot test must skip `device`) |
+| Device support | Does the engine take a device arg at all, and **what string does its own code do with**? Read the loader, don't guess: a value that reaches `torch.device(...)`/`device_map=` accepts `cuda:<index>`; a value compared to a literal (`if self.device != "cuda"`) or rebuilt with a hard-coded ordinal (`torch.device(device, 0)`) does **not** — there an index silently lands on the wrong device, so refuse it and document `CUDA_VISIBLE_DEVICES`. No device arg / auto-select only → `DEVICE_ENV = None` (dots.tts, Pocket TTS, Qwen3-TTS MLX), and the snapshot test must skip `device`. See "Device contract" below (docs/01 D8) |
+| Install route | PyPI or git-only? Does the latest **PyPI release** have every symbol the server imports? (Chatterbox's 0.1.7 lacks `MULTILINGUAL_T3_MODELS`, so only a git install works.) Extras or git-only dependencies (IndexTTS `--all-extras`, LuxTTS `linacodec`)? Drives the docstring's install line, `impl/server_<name>.md`, and whether Phase 6 is needed |
+| Torch setup | The engine pyproject's torch/torchaudio pins, `[tool.uv.sources]` index names/URLs, any `constraint-dependencies`. Is there a CUDA build for aarch64 Linux? (None before torch 2.9 / cu130.) Does the engine call `torchaudio.load`/`save`? (Moved to TorchCodec in 2.9.) Feeds Phase 6 |
+| Python version | Minor version of the engine's own venv → the env's `.python-version`, so uv reuses the cached torch wheels |
 
 ## Phase 2 — Server script: `impl/server_<name>.py`
 
 Follow the section layout of `server_chatterbox.py` exactly:
 
 1. **Module docstring** — what it does, every env var with its default, the
-   `pip install <engine-pkg> fastapi uvicorn loguru soundfile` + tts-engine-common line, usage.
+   `pip install <engine-pkg> fastapi uvicorn loguru soundfile` + tts-engine-common line
+   (`pip install git+https://…` when PyPI is missing or lags — see Phase 1 "Install route"),
+   plus "Or use the uv environment in envs/<engine>/ (python3 tools/serve.py <engine>)"
+   if Phase 6 adds one (pattern: `server_chatterbox.py` docstring), usage.
 2. **Config** — `os.getenv` at **import time** (module level). Fail-fast `_validate_config()`
-   for enumerated values (device, model name).
+   for enumerated values (model name, cache dirs). The **device** value is *not* parsed
+   by hand: it goes through the shared `parse_device()` — see "Device contract" below.
 3. **Constants** — `SEED_MIN`/`SEED_MAX` (all current servers use 1–1000),
    `MIN_PROMPT_DURATION_S`, `MAX_AUDIO_B64_LEN = 10_000_000`.
 4. **`SynthesisRequest`** — `model_config = ConfigDict(extra="forbid")` (non-negotiable, D5).
@@ -50,7 +61,13 @@ Follow the section layout of `server_chatterbox.py` exactly:
    A core field the engine can't use is **omitted entirely** (Chatterbox has no
    `reference_text`) — never stubbed with a dead `None`.
 5. **`SynthesisResponse(CoreSynthesisResponse)`** — add `fid: str` plus any engine extras you actually report back.
-6. **`HealthResponse`** — `status`, `serverType`, `model` (label string), `device`.
+6. **`HealthResponse(CoreHealthResponse)`** — subclass the shared /health core
+   (`status`, `model`, `device`, and the `version` field carrying the shared
+   `RELEASE_VERSION` constant — all imported from `tts_engine_common`) and
+   override/add only `serverType` (a `Literal`) plus `model`/`device` bound to
+   the import-time config constants. Never hand-roll the health model from
+   `BaseModel` or re-declare `version`/`status` — `test_versioning_contract.py`
+   asserts every server subclasses the core.
 7. **`CAPABILITIES = build_capabilities(...)`** — stable engine slug (e.g. `"dots.tts"`),
    model label, device, the **real** sample rate, `watermarked`, `reference_audio` spec
    (required/formats/min_duration_s/note), `languages` (list or `None`), `overrides`
@@ -59,7 +76,9 @@ Follow the section layout of `server_chatterbox.py` exactly:
    `torch.cuda.empty_cache()`.
 9. **`/capabilities` route** — `app.add_api_route("/capabilities", capabilities_endpoint(CAPABILITIES), ...)`.
 10. **Runtime** — dataclass + lazy `_get_runtime()`; `_synthesis_lock = threading.Lock()`
-    where the model has shared mutable state.
+    where the model has shared mutable state. If the server guards device availability,
+    its `_check_device_available()` runs inside `_get_runtime()` **before** the loader —
+    after the `if _runtime is None:` gate, before a single byte of checkpoint is read.
 11. **Global exception handler** → 500 with a message (copy verbatim).
 12. **Endpoints** — `/` (HTML landing page), `/health`, `/synthesize`:
     `decode_base64` → `_check_reference_audio` (header-only `sf.info`, 400s) → seed resolution →
@@ -71,9 +90,13 @@ Follow the section layout of `server_chatterbox.py` exactly:
      a shared name races with concurrent requests) or `write_temp_audio()`/`cleanup_temp()`
      (UUID name, per-request cleanup — for one-shot engines). `_numpy_to_wav_bytes`.
 14. **`__main__`** — `uvicorn.run(app, host=<NAME>_HOST (default 0.0.0.0), port=<NAME>_PORT (default 7500))`.
+    Read them as literal `os.getenv("<NAME>_HOST", "0.0.0.0")` / `os.getenv("<NAME>_PORT", "7500")`:
+    `tools/serve.py --host/--port` sets exactly these, and a test greps the script for both names.
 
 Env var prefix convention: engine name in caps with underscores (`QWEN3TTS_DEVICE`,
-`DOTS_TTS_MODEL`), plus `*_HOST` / `*_PORT`.
+`DOTS_TTS_MODEL`), plus `*_HOST` / `*_PORT`. The prefix doesn't follow the engine slug or the
+env name (`LUX_TTS`, `INDEXTTS`, `QWEN3TTS_MLX`), which is why an env declares it explicitly
+as `env-prefix` (Phase 6).
 
 ## Language contract (docs/02-language-handling.md)
 
@@ -105,6 +128,58 @@ the capabilities document never see it:
   normalization validator, and `DEFAULT_LANGUAGE` — docs/02 says such engines accept a
   `language` value *without erroring* — pass `languages=None`, and simply don't forward
   the value to the engine.
+
+## Device contract (docs/01 D8)
+
+The grammar of `<NAME>_DEVICE` lives once in `tts_engine_common.devices` (torch-free,
+per D7); **probing stays in the server** because only torch can answer "does this box
+have that GPU?". Four declarations, in the config block, and no hand-rolled regex,
+`startswith("cuda")`, or device-name tuple — `test_device_contract.py` fails any of those:
+
+```python
+DEVICE_ENV         = "<NAME>_DEVICE"        # None if the engine has no device knob
+DEVICE_SETTING     = os.getenv(DEVICE_ENV, "cuda")   # input to the parser only
+DEVICE_FAMILIES    = ("cuda", "mps", "cpu") # what the ENGINE accepts — read its source
+DEVICE_ALLOW_INDEX = True                   # False if the engine can't use an ordinal
+DEVICE_SPEC        = parse_device(DEVICE_SETTING,
+                                  env_var=DEVICE_ENV,
+                                  families=DEVICE_FAMILIES,
+                                  allow_index=DEVICE_ALLOW_INDEX,
+                                  note="<engine-specific reason, if index=False>")
+DEVICE             = DEVICE_SPEC.requested  # THE string: engine, /health, /capabilities
+DEVICE_ENGINE_RESOLVES = True               # only if the engine picks/falls back itself
+```
+
+- `DEVICE`, not `DEVICE_SETTING`, is what everything downstream reads. The parser strips
+  surrounding whitespace, so a server that keeps passing the raw env value validates
+  `"cuda"` and then hands `" cuda "` to `torch`/`device_map=` — a failure inside the
+  model load with a message blaming the engine for a shell's typo. The device contract
+  test probes exactly this (`INDEXTTS_DEVICE` is the documented exception: empty means
+  "the engine picks", and no device kwarg is forwarded at all).
+- `DEVICE_FAMILIES` is the *engine's* capability, never an aspirational list: a family
+  no engine can serve is a family the operator can only get wrong (only IndexTTS
+  declares `xpu`; the CUDA-only engines declare `("cuda",)`).
+- `DEVICE_ALLOW_INDEX = False` **requires** a `note=` in the parse call and a
+  `CUDA_VISIBLE_DEVICES` line in the module docstring, both asserted by the contract
+  test. Get the evidence from the vendored engine before choosing either way —
+  KittenTTS's `if self.device != "cuda": return "cpu"` and LuxTTS's
+  `torch.device(device, 0)` are why those two refuse `cuda:1`.
+- The existence guard is a one-liner in the server, at **model load** (never import:
+  `_bootstrap.py` pins `*_DEVICE=cuda` against a stub torch that reports no GPU, and
+  import-time probing would take `/capabilities` down with it):
+
+  ```python
+  def _check_device_available() -> None:
+      require_cuda_available(DEVICE_SPEC, env_var=DEVICE_ENV,
+                             is_available=torch.cuda.is_available,
+                             device_count=torch.cuda.device_count)
+  ```
+
+  `DEVICE_ENGINE_RESOLVES = True` means *no* such function: the engine's own fallback
+  (LuxTTS `cuda` → `mps` → `cpu`) is a working path that a guard would turn into a
+  startup crash. The flag exists so the contract test can tell that from an oversight.
+- Never rewrite the advertised `device`: an unavailable device is a startup error, and
+  `/capabilities` keeps reporting the configured string.
 
 ## Phase 3 — Test stub: `impl/tests/stubs/<import_name>/`
 
@@ -152,32 +227,90 @@ Copy `test_server_chatterbox.py`'s structure:
 2. `impl/tests/update_snapshots.py` — add `(server_<name>, "<slug>_capabilities.json")` to `ENGINES`.
 3. `impl/tests/test_language_contract.py` — add `(server_<name>, <auto_allowed>)` to
    `SERVERS` so the shared docs/02 language-contract battery runs against the new server.
-4. Regenerate and review: `python impl/tests/update_snapshots.py`, then
+4. `impl/tests/test_versioning_contract.py` — add `server_<name>` to `SERVER_MODULES`
+   (an unwired server fails there even if its own suite passes).
+5. `impl/tests/test_device_contract.py` — add `server_<name>` to `SERVER_MODULES`.
+   A glob test fails on any `impl/server_*.py` missing from that list, so this is not
+   optional. The server must express its device posture (the four D8 declarations, or
+   `DEVICE_ENV = None` when the engine has no knob) — copy-pasting an old server's
+   device check fails here rather than in production.
+6. Regenerate and review: `python impl/tests/update_snapshots.py`, then
    `git diff impl/tests/snapshots/`. Never hand-edit a snapshot — capabilities are derived
    from the Pydantic model (D4).
-5. Add `impl/server_<name>.md` with engine notes and installation/run instructions.
-   Follow the pattern of other server-specific markdown files in `impl`.
-6. Docs: add link to engine-specific doc to `impl/README.md` and the root `README.md` Engines list.
+7. Add `impl/server_<name>.md` with engine notes and installation/run instructions.
+   Follow the pattern of other server-specific markdown files in `impl`. If Phase 6 adds an
+   env, include an "Alternative: from a local <Engine> git checkout (uv)" section after the
+   pip recipe (model: `impl/server_chatterbox.md`).
+8. Docs: add link to engine-specific doc to `impl/README.md` and the root `README.md` Engines list.
    Update `AGENTS.md` which tracks a list and a count of supported engines - add known quirks
    for the new engine if relevant. Use the existing engine entries as a guide; keep it brief.
+
+## Phase 6 — Engine environment: `envs/<engine>/` (optional)
+
+A small virtual uv project that builds a dedicated venv for this one server from a sibling
+engine git checkout plus editable `tts-engine-common`, started with
+`python3 tools/serve.py <engine>`. Spec and the authoritative step-by-step checklist:
+`docs/04-engine-environments.md` → "Adding an environment for another engine". Follow it;
+this section only says when to do it and what is easy to get wrong.
+
+**When.** Effectively required if the engine is git-only (LuxTTS), if its PyPI release lags
+what the server imports (Chatterbox), or if the engine's own install is a uv venv the
+tts-serve deps can't live in (IndexTTS — docs/04 problems 1–2). Recommended when the engine
+needs a hardware-specific torch build (aarch64 Linux / cu130). Low value when there's no CUDA
+torch at all (Qwen3-TTS MLX). Either way the pip recipe in `impl/server_<name>.md` stays the
+default; the env is documented next to it as an alternative.
+
+**Files.** `envs/<engine>/pyproject.toml` and `envs/<engine>/.python-version` — nothing else
+is committed (`.venv/` and `uv.lock` are gitignored). `<engine>` is the lowercase engine name,
+which is what users type after `tools/serve.py`. Start by copying whichever of the two
+existing envs matches the engine's torch setup (see canonical references above).
+
+**Easy to get wrong** (docs/04 has the reasons):
+- Torch pins go in `override-dependencies`, **never** `constraint-dependencies` — uv also
+  applies the checkout's own `tool.uv.sources`, and only an override replaces them.
+- `torch` and `torchaudio` must be listed as direct dependencies, or their index sources
+  don't apply.
+- Reuse the engine's own index names, and declare every PyTorch index `explicit = true`.
+- `[tool.tts-serve]` needs both `server = "impl/server_<name>.py"` and
+  `env-prefix = "<NAME>"` matching the server's `<NAME>_HOST` / `<NAME>_PORT`.
+  `tools/tests/test_serve.py::test_committedEnvs_eachNameAnExistingServerScriptAndItsEnvPrefix`
+  fails otherwise.
+- The env never replaces the Phase 3 stub: the test suite doesn't use envs. And torch stays
+  out of `tts-engine-common` (D7).
+
+**Verify on a real box** (docs/04 step 5): `python3 tools/serve.py <engine> --port 7501`
+syncs and starts (`--list` then shows `ready`); `envs/<engine>/.venv/bin/python` imports torch
+at the expected version with CUDA where expected, and imports the engine from the checkout;
+the live `/capabilities` matches the committed snapshot (except `device` for auto-select
+engines); `tools/speak.py` synthesizes audio.
+
+**Record it.** Add a dated implementation section to docs/04 (what was verified, decisions
+taken — like the OmniVoice and Chatterbox records), update its "Done so far" line and
+candidates table, and list the new directory in the `envs/` bullet of `AGENTS.md`.
 
 ## Verify
 
 ```bash
-python -m pytest tts-engine-common/tests/ impl/tests/   # works with no torch/GPU/engine installed
+# works with no torch/GPU/engine installed; tools/tests/ includes the committed-env check
+python -m pytest tts-engine-common/tests/ impl/tests/ tools/tests/
 ```
+
+On a GPU box with the engine installed (or its Phase 6 env), also start the server and
+synthesize with `tools/speak.py` — the suite never exercises a real model.
 
 ## Gotchas
 
-- Sample rate: two of the four current servers are already 48 kHz surprises waiting to
-  happen — always read the engine's own constant.
+- Sample rate: the current servers already use three rates — 24 kHz (most), 48 kHz
+  (dots.tts, LuxTTS, VoxCPM), 22.05 kHz (IndexTTS) — always read the engine's own constant.
 - `tts-engine-common` must stay torch-free — never import engine or torch symbols there (D7).
 - Language: the API speaks two-letter lowercase codes (docs/02); engine-internal formats
   (names, uppercase codes, auto-detection sentinels) stay in a private mapping inside the
   server. `schema_version` is 2 *because of* this contract — don't "fix" a server back to
   accepting names or free-form, and don't hand-edit the language entries in a snapshot.
-- If the engine's in-context mode hard-requires a transcript, mirror Qwen3-TTS's fallback
-  (e.g. speaker-embedding-only mode) rather than making `reference_text` required.
+- If the engine's in-context mode hard-requires a transcript: when the engine itself offers
+  a transcript-free mode (Qwen3-TTS's speaker-embedding-only mode), fall back to it when
+  `reference_text` is omitted; otherwise make `reference_text` required (422 without it),
+  as faster-qwen3-tts and Qwen3-TTS MLX do. Never invent a fallback the engine doesn't have.
 - If the engine transcribes the reference itself (OmniVoice's Whisper path), note the lazy
   ASR-model load in the `reference_audio.note` and the docstring.
 - The stub `numpy` exists to satisfy pytest's own introspection; if a cross-suite run dies

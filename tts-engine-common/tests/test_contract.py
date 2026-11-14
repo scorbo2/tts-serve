@@ -12,7 +12,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from tts_engine_common import CORE_FIELDS, Capabilities, build_capabilities
+from tts_engine_common import (
+    CORE_FIELDS,
+    Capabilities,
+    CoreHealthResponse,
+    RELEASE_VERSION,
+    build_capabilities,
+)
 
 
 class _SampleRequest(BaseModel):
@@ -82,3 +88,40 @@ def test_contract_document_isJsonSerializable() -> None:
     # WHEN dumped with mode="json",
     # THEN json.dumps succeeds (no NaN/inf, no non-JSON types):
     json.dumps(doc.model_dump(mode="json"))
+
+
+# ---------------------------------------------------------------------------
+# The frozen /health core (CoreHealthResponse)
+# ---------------------------------------------------------------------------
+
+
+def test_coreHealthResponse_frozenFieldSet() -> None:
+    # GIVEN the shared health core:
+    # THEN it advertises exactly the frozen field set — the release version
+    # rides along, and the release line itself is its default:
+    assert set(CoreHealthResponse.model_fields) == {
+        "status",
+        "serverType",
+        "model",
+        "device",
+        "version",
+    }
+    assert CoreHealthResponse.model_fields["version"].default == RELEASE_VERSION
+
+
+def test_coreHealthResponse_serverSubclassOverridesOnlyServerType() -> None:
+    # GIVEN an engine-style subclass: serverType narrowed to a Literal,
+    # model/device bound to import-time config — nothing else re-declared:
+    class _SampleHealth(CoreHealthResponse):
+        serverType: Literal["Sample"] = "Sample"
+        model: str = "sample-model-checkpoint"
+        device: str = "cuda"
+
+    # WHEN instantiated with no arguments (as every /health handler does),
+    # THEN the core fields come from the base, the override from the subclass:
+    body = _SampleHealth().model_dump()
+    assert body["status"] == "ok"
+    assert body["serverType"] == "Sample"
+    assert body["model"] == "sample-model-checkpoint"
+    assert body["device"] == "cuda"
+    assert body["version"] == RELEASE_VERSION

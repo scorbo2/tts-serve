@@ -19,8 +19,11 @@ languages + auto); the engine itself validates against its own config.
 Configuration (environment variables):
     QWEN3TTS_MODEL      HuggingFace id or local path.
                         Default: Qwen/Qwen3-TTS-12Hz-1.7B-Base
-    QWEN3TTS_DEVICE     Device to load the model on.  One of: cuda, mps, cpu.
-                        Default: cuda
+    QWEN3TTS_DEVICE     Device to load the model on: 'cuda', 'cuda:<index>',
+                        'mps', or 'cpu'.  Default: cuda.  The shared grammar
+                        (docs/01 D8) is checked at import time; a CUDA request
+                        this box cannot serve (no CUDA at all, or an index past
+                        the last GPU) fails before the checkpoint is loaded.
     QWEN3TTS_HOST       Bind host for `python server_qwen3TTS.py`.
                         Default: 0.0.0.0
     QWEN3TTS_PORT       Bind port for `python server_qwen3TTS.py`.
@@ -57,22 +60,55 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from qwen_tts import Qwen3TTSModel
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    canonical_language_codes,
+    canonical_language_literal,
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
 )
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
-
 MODEL_NAME_OR_PATH = os.getenv("QWEN3TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-DEVICE = os.getenv("QWEN3TTS_DEVICE", "cuda")
+DEVICE_ENV = "QWEN3TTS_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
+
+# What this engine can serve.  The device lands on transformers'
+# `device_map=`, whose documented grammar includes an indexed CUDA device, so
+# a second GPU is addressable here (it was not under the old membership tuple,
+# which made this server strictly less capable than its Ming/Ming-MoE
+# siblings).  Grammar rules are shared (docs/01 D8).
+DEVICE_FAMILIES = ("cuda", "mps", "cpu")
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (device_map=, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    Without it, `device_map='cuda:9'` reaches the loader, which downloads the
+    checkpoint and only then fails while placing weights -- the failure this
+    server promises to catch first (docs/01 D8).
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 # The speech tokenizer emits 24 kHz audio; generate_voice_clone() echoes the
 # rate back in its return value, which is what every response uses.
@@ -110,16 +146,9 @@ LANGUAGE_CODE_TO_NAME = {
 }
 LANGUAGE_CODES = tuple(LANGUAGE_CODE_TO_NAME)
 
-
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    if DEVICE not in SUPPORTED_DEVICES:
-        raise ValueError(
-            f"QWEN3TTS_DEVICE must be one of {SUPPORTED_DEVICES}, got {DEVICE!r}"
-        )
-
-
-_validate_config()
+# The device grammar above (parse_device) is this server's whole import-time
+# config check: a malformed QWEN3TTS_DEVICE already raised a ValueError naming
+# the variable before this module finished importing.
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -127,8 +156,11 @@ _validate_config()
 
 # Dynamic Literal over the Base checkpoint's language codes (+ the engine's
 # 'auto' auto-detection sentinel) so the request schema and the
-# /capabilities enum share one source.
-Language = Literal[("auto", *LANGUAGE_CODES)]
+# /capabilities enum share one source.  Built via the shared helper to pin
+# canonical order ('auto' first, then sorted codes — not the mapping's
+# declaration order); see tts_engine_common.canonical_language_literal for
+# the pydantic Literal-cache collision that makes that pinning mandatory.
+Language = canonical_language_literal(LANGUAGE_CODES, auto=True)
 
 
 class SynthesisRequest(BaseModel):
@@ -229,10 +261,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["Qwen3-TTS"] = "Qwen3-TTS"
     model: str = MODEL_NAME_OR_PATH
     device: str = DEVICE
@@ -259,7 +294,7 @@ CAPABILITIES = build_capabilities(
             "omitted, cloning falls back to speaker-embedding-only mode."
         ),
     },
-    languages=sorted(LANGUAGE_CODES),
+    languages=list(canonical_language_codes(LANGUAGE_CODES)),
     overrides={
         "x_vector_only_mode": {"advanced": True},
         "temperature": {"step": 0.05},
@@ -294,7 +329,7 @@ app = FastAPI(
         "get back cloned speech.  Machine-readable parameter metadata at "
         "GET /capabilities."
     ),
-    version="0.2.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 
@@ -331,6 +366,7 @@ def _get_runtime() -> Qwen3TTSRuntime:
     """
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading Qwen3-TTS model '%s' on device '%s' ...",
             MODEL_NAME_OR_PATH,

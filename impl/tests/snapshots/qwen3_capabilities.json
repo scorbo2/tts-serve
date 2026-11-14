@@ -99,16 +99,16 @@
       "step": null,
       "enum": [
         "auto",
-        "zh",
-        "en",
-        "fr",
         "de",
+        "en",
+        "es",
+        "fr",
         "it",
         "ja",
         "ko",
         "pt",
         "ru",
-        "es"
+        "zh"
       ],
       "min_length": null,
       "max_length": null,

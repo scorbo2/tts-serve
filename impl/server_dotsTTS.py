@@ -56,6 +56,8 @@ from dots_tts.runtime import DotsTtsRuntime
 from dots_tts.utils.util import seed_everything
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
@@ -74,7 +76,11 @@ from tts_engine_common import (
 MODEL_NAME_OR_PATH = os.getenv("DOTS_TTS_MODEL", "rednote-hilab/dots.tts-soar")
 
 # The runtime auto-selects CUDA when available (see DotsTtsRuntime.__init__);
-# mirror its decision for the capabilities document.
+# mirror its decision for the capabilities document.  There is no device knob
+# to validate, and DEVICE_ENV = None is how this server tells the device
+# contract test (impl/tests/test_device_contract.py) that the omission is
+# deliberate rather than forgotten.
+DEVICE_ENV = None
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # The 48 kHz AudioVAE vocoder; the runtime reads it from the model config at
@@ -196,10 +202,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     num_steps: int = Field(..., description="Flow-matching sampling steps used.")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["dots.tts"] = "dots.tts"
     model: str = MODEL_NAME_OR_PATH
     device: str = DEVICE
@@ -260,7 +269,7 @@ app = FastAPI(
         "get back cloned speech.  Machine-readable parameter metadata at "
         "GET /capabilities."
     ),
-    version="0.2.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 

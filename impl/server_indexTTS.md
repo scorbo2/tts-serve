@@ -101,6 +101,15 @@ python impl/server_indexTTS.py
 
 export INDEXTTS_DEVICE=mps
 python impl/server_indexTTS.py
+
+export INDEXTTS_DEVICE=cuda:1
+python impl/server_indexTTS.py
 ```
+
+An indexed CUDA device (`cuda:1`) is accepted — a second GPU is addressable.
+Leaving `INDEXTTS_DEVICE` empty means the same thing as `auto`. A value that
+names no device (`cuda:abc`, `tpu`) is a startup error naming
+`INDEXTTS_DEVICE`, and an index this box does not have is refused when the
+model loads — before any weights are read, not partway through the load.
 
 

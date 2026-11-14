@@ -113,12 +113,15 @@ export VOXCPM_DEVICE=cpu
 python impl/server_voxcpm.py
 ```
 
-`auto`, `cuda`, `cuda:<index>`, `mps`, and `cpu` are accepted. `auto` lets the
-engine pick (CUDA preferred, then MPS, then CPU); an explicit device that is
-not available on the machine fails at model load with a clear error. On MPS
-the engine forces `float32` by default (bfloat16/float16 cause numerical drift
-that breaks the diffusion loop) -- see the `VOXCPM_MPS_DTYPE` note below if you
-want to test a different dtype.
+`auto`, `cuda`, `cuda:<index>`, `mps`, and `cpu` are accepted — the same
+grammar the engine documents, checked by the server at launch so a typo never
+reaches the loader. `auto` lets the engine pick (CUDA preferred, then MPS, then
+CPU); an explicit CUDA request this box cannot serve — `cuda` with no GPU, or
+`cuda:9` on a one-GPU box — is refused at model load with a message naming
+`VOXCPM_DEVICE`, the ordinal, and the GPU count, before the checkpoint is read.
+On MPS the engine forces `float32` by default (bfloat16/float16 cause numerical
+drift that breaks the diffusion loop) -- see the `VOXCPM_MPS_DTYPE` note below if
+you want to test a different dtype.
 
 ### MPS dtype override
 

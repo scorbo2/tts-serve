@@ -73,9 +73,13 @@ from mlx_audio.utils import resample_audio
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
+    CoreHealthResponse,
+    RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
     capabilities_endpoint,
+    canonical_language_codes,
+    canonical_language_literal,
     compute_rtf,
     decode_base64,
     normalize_language,
@@ -91,7 +95,10 @@ MODEL_NAME_OR_PATH = os.getenv(
 
 # No device env var: mlx-audio has no device-selection argument, and MLX
 # itself auto-selects its compute backend (Metal on Apple Silicon).  "mlx" is
-# the string reported everywhere a device value is expected.
+# the string reported everywhere a device value is expected.  DEVICE_ENV = None
+# is the device contract test's declaration that the absence is deliberate
+# (impl/tests/test_device_contract.py).
+DEVICE_ENV = None
 DEVICE = "mlx"
 
 # Verified against the installed mlx-audio source: Qwen3TTSModel.ModelConfig
@@ -142,8 +149,10 @@ LANGUAGE_CODES = tuple(LANGUAGE_CODE_TO_NAME)
 
 # Dynamic Literal over the Base checkpoint's language codes (+ the engine's
 # 'auto' auto-detection sentinel, mlx-audio's own default for `lang_code`) so
-# the request schema and the /capabilities enum share one source.
-Language = Literal[("auto", *LANGUAGE_CODES)]
+# the request schema and the /capabilities enum share one source.  Built via
+# the shared helper to pin canonical order; see
+# tts_engine_common.canonical_language_literal for why that pinning matters.
+Language = canonical_language_literal(LANGUAGE_CODES, auto=True)
 
 
 class SynthesisRequest(BaseModel):
@@ -229,10 +238,13 @@ class SynthesisResponse(CoreSynthesisResponse):
     fid: str = Field(..., description="Request ID (internal).")
 
 
-class HealthResponse(BaseModel):
-    """Health / readiness check."""
+class HealthResponse(CoreHealthResponse):
+    """The /health core from tts_engine_common, with this engine's serverType.
 
-    status: Literal["ok"] = "ok"
+    model/device pick up the import-time config; version carries the shared
+    RELEASE_VERSION constant — overriding it here is how a server drifts.
+    """
+
     serverType: Literal["Qwen3-TTS-MLX"] = "Qwen3-TTS-MLX"
     model: str = MODEL_NAME_OR_PATH
     device: str = DEVICE
@@ -261,7 +273,7 @@ CAPABILITIES = build_capabilities(
             "high-quality cloning."
         ),
     },
-    languages=sorted(LANGUAGE_CODES),
+    languages=list(canonical_language_codes(LANGUAGE_CODES)),
 )
 
 # ---------------------------------------------------------------------------
@@ -290,7 +302,7 @@ app = FastAPI(
         "cloned speech.  Machine-readable parameter metadata at "
         "GET /capabilities."
     ),
-    version="0.1.0",
+    version=RELEASE_VERSION,
     lifespan=lifespan,
 )
 

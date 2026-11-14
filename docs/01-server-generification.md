@@ -18,6 +18,7 @@ Clients: `speak.py` example command-line script (bundled in this repo), `TalkWit
 | D5 | **`extra="forbid"` on all request models.** | Pydantic's default silently *drops* unknown fields — i.e., sending `exaggeration` to the OmniVoice server vanishes without a trace. We want loud 422s that name the offending field. |
 | D6 | **Client renders engine-specific options generically from metadata** (number→slider, enum→select, …). Zero per-engine UI code. | This is the actual fix for "impossible to slot unique features into the UI." |
 | D7 | **Shared package `tts-engine-common`** (pure fastapi + pydantic, no torch) installed into all four servers. | Kills the copy-paste divergence that produced the OmniVoice-paste bugs. One version, independently testable. |
+| D8 *(amended 2026-11-14)* | **Device-string grammar is shared; device probing is not.** `tts_engine_common.devices.parse_device()` validates `<family>` / `<family>:<index>` at import time; the `torch.cuda` availability/ordinal check stays in each server and runs at model-load time. | Twelve servers hand-rolled the same grammar three different ways, and none checked that an accepted `cuda:<index>` exists — a typo or an out-of-range GPU index bought a multi-GB checkpoint download before a C++ assert. Grammar needs no torch (D7); probing does. §5.1. |
 
 ---
 
@@ -330,6 +331,80 @@ CAPABILITIES = build_capabilities(
 app.add_api_route("/capabilities", capabilities_endpoint(CAPABILITIES),
                   methods=["GET"], tags=["System"])
 ```
+
+### 5.1 Device strings: one grammar, probing stays local (D8)
+
+Twelve servers read a `<PREFIX>_DEVICE` env var, and between them hand-rolled
+three different grammars (`startswith("cuda")`, tuple membership, a full regex);
+only the regex camp checked the string properly. Four accepted `cuda:<index>`,
+eight rejected it, and no server checked that the index it accepted actually
+exists — so `AUDIO8_TTS_DEVICE=cuda:9` downloaded 6.8 GB of weights before
+FlashAttention threw a C++ `device_name` assert, and `BREEZEBLUE_DEVICE=cuda:5`
+passed the server's `startswith("cuda")` and died inside the engine. The two
+failure classes are independent, and D8 keeps them independent:
+
+- **Grammar** (does the string *name a device*?) needs no torch, no GPU, no
+  engine — so it lives in `tts_engine_common.devices` and runs at import.
+- **Availability** (does that device *exist*?) needs torch — so it stays in the
+  server, per D7. The shared helper takes the probes as arguments
+  (`is_available`, `device_count`) and short-circuits for non-CUDA families, so
+  a CPU-only box never imports torch just to be told `cpu` is fine.
+
+Every server declares its device surface as data next to its other env config:
+
+```python
+DEVICE_ENV         = "QWEN3TTS_DEVICE"      # None for engines with no knob at all
+DEVICE_SETTING     = os.getenv(DEVICE_ENV, "cuda")   # input to the parser only
+DEVICE_FAMILIES    = ("cuda", "mps", "cpu") # this engine's own device grammar
+DEVICE_ALLOW_INDEX = True                   # `<family>:<index>` accepted?
+DEVICE_SPEC        = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV,
+                                  families=DEVICE_FAMILIES)
+# capabilities/health and the engine call all read DEVICE -- the parsed
+# spelling of what the operator asked for, never the raw env value:
+DEVICE = DEVICE_SPEC.requested
+
+def _check_device_available() -> None:
+    """Existence check; called at model-load time, before the checkpoint load."""
+    require_cuda_available(DEVICE_SPEC, env_var=DEVICE_ENV,
+                           is_available=torch.cuda.is_available,
+                           device_count=torch.cuda.device_count)
+```
+
+(`require_cuda_available` takes the probes as callables rather than importing
+torch — that is how a torch-free package asks a torch question, and how a test
+pins a fake GPU count without a GPU. The grammar also refuses an index on a
+family that has none: `cpu:0` and `mps:0` are grammar errors here, not a torch
+surprise halfway through a model load. And note which string the servers use
+afterwards: `DEVICE`, the parsed one. Stripping whitespace is deliberate —
+env files and shell quoting produce it — so validating `"cuda"` while handing
+`" cuda "` to `device_map=` would put the failure back inside the model load,
+with a message blaming the engine for the shell's typo.)
+
+Two flags keep the exceptions in the open instead of in twelve separate opinions:
+
+- `DEVICE_ENGINE_RESOLVES = True` marks the servers that deliberately do **not**
+  probe (`chatterbox`, `luxtts`): their engines test availability themselves —
+  LuxTTS falls back `cuda` → `mps` → `cpu` on its own — and a server-side guard
+  would turn a working fallback into a startup crash.
+- `DEVICE_ALLOW_INDEX = False` marks the three servers that refuse `cuda:1`
+  (`chatterbox`, `luxtts`, `kittentts`): the engine behind them treats the
+  device as a family string and would otherwise mis-run an index silently. This
+  is vendored-code evidence, not caution — LuxTTS's loader does
+  `params.device = torch.device(device, 0)` (model pinned to GPU 0, Whisper
+  handed the raw string), and KittenTTS's `speaker.py` opens
+  `if self.device != "cuda": return "cpu"` (so `cuda:1` means "run the
+  transcriber on CPU"). `CUDA_VISIBLE_DEVICES` is the supported way to pick a
+  GPU for those three, and each server's docstring and `.md` say so.
+
+Both flags are capability-as-data so `impl/tests/test_device_contract.py` can
+tell a deliberate exception from an oversight.
+
+The order of the two checks matters. The grammar runs at import: a typo is
+reported before any weight download, and `/capabilities` on a CPU-only box keeps
+answering. The probe runs at model-load: the pinned test env (`_bootstrap.py`
+pins `*_DEVICE=cuda` against a stub torch that reports no GPU) still gets a 200
+from `/capabilities`. Both happen **before** the checkpoint load — that is the
+whole point.
 
 ### 6.2 Port checklist (repeat per engine: OmniVoice, Qwen3-TTS, dots.tts)
 

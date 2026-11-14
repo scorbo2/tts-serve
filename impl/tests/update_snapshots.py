@@ -25,13 +25,18 @@ _bootstrap.setup()
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import server_audio8TTS  # noqa: E402
 import server_breezeBlue  # noqa: E402
 import server_chatterbox  # noqa: E402
 import server_dotsTTS  # noqa: E402
 import server_fasterQwen3TTS  # noqa: E402
 import server_indexTTS  # noqa: E402
+import server_kittenTTS  # noqa: E402
 import server_luxTTS  # noqa: E402
+import server_ming3TTS  # noqa: E402
+import server_ming3TTS_moe  # noqa: E402
 import server_omnivoice  # noqa: E402
+import server_pocketTTS  # noqa: E402
 import server_qwen3TTS  # noqa: E402
 import server_qwen3TTS_mlx  # noqa: E402
 import server_voxcpm  # noqa: E402
@@ -48,8 +53,13 @@ ENGINES = (
     (server_dotsTTS, "dots_capabilities.json"),
     (server_indexTTS, "indextts_capabilities.json"),
     (server_luxTTS, "lux_tts_capabilities.json"),
+    (server_ming3TTS, "ming3_tts_capabilities.json"),
+    (server_ming3TTS_moe, "ming3_tts_moe_capabilities.json"),
     (server_voxcpm, "voxcpm_capabilities.json"),
     (server_breezeBlue, "breeze_blue_capabilities.json"),
+    (server_pocketTTS, "pocket_tts_capabilities.json"),
+    (server_audio8TTS, "audio8_tts_capabilities.json"),
+    (server_kittenTTS, "kittentts_capabilities.json"),
 )
 
 
