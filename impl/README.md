@@ -310,6 +310,20 @@ What is covered:
   (engine task/knob forwarding, seed handling — server-side re-seeding on
   the 0.5b, engine-side on the MoE — and staged-file kept vs deleted per
   request); real audio generation is still out of scope.
+- Cross-server contract tests, one file per contract, run against every
+  `impl/server_*.py` registered in that file's list (`SERVERS` /
+  `SERVER_MODULES`) — a new engine that skips the registration is covered by
+  none of them, so the registration step is part of adding an engine.
+  `test_language_contract.py` (docs/02), `test_versioning_contract.py`
+  (`RELEASE_VERSION` in `/health`, `schema_version` in `/capabilities`), and
+  `test_device_contract.py` (docs/01 D8: the device string is parsed by the
+  shared grammar, the engine's own family set is declared as data, and the
+  "does this GPU exist" check runs in the load path before the checkpoint —
+  that file also globs `impl/server_*.py` and fails on an unregistered
+  server). The device test's grammar cases import each server in a **fresh
+  subprocess** with the device variable overridden, because the in-process
+  suite pins that variable (`tests/_bootstrap.py`) and the grammar runs at
+  import.
 
 What is *not* covered: actual synthesis (needs a real model + GPU).  The
 `/synthesize` success path is exercised only where a test installs a fake

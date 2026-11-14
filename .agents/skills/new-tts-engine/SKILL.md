@@ -34,7 +34,7 @@ entry point (and any demo app). Extract:
 | Language table | The API contract is fixed — two-letter lowercase codes, null/empty → `en` (docs/02). This decides only *how the server adapts*: engine keyed by codes (Chatterbox) → `Literal` over its codes; engine speaks a different format (Qwen3 lowercase names, dots.tts uppercase) → private code → engine-value mapping table, `Literal` over the *codes*; no table / free-form (OmniVoice, ~646 langs) → `str \| None` + `validate_language_code` after-validator (pass `allow_auto=True` if the engine offers auto-detection), `languages=None` in capabilities. See "Language contract" below |
 | Audio constraints | minimum usable duration (→ `MIN_PROMPT_DURATION_S`), truncation behavior (e.g. Chatterbox's first-10 s), does it demand a **file path** for prompt audio? |
 | Thread safety | shared mutable model state between calls? → needs a `_synthesis_lock` (see the comment in `server_chatterbox.py`) |
-| Device support | explicit cuda/mps/cpu arg (→ `<NAME>_DEVICE` env var) vs auto-select (→ mirror `torch.cuda.is_available()` like dots.tts; no env var, and the snapshot test must skip `device`) |
+| Device support | Does the engine take a device arg at all, and **what string does its own code do with**? Read the loader, don't guess: a value that reaches `torch.device(...)`/`device_map=` accepts `cuda:<index>`; a value compared to a literal (`if self.device != "cuda"`) or rebuilt with a hard-coded ordinal (`torch.device(device, 0)`) does **not** — there an index silently lands on the wrong device, so refuse it and document `CUDA_VISIBLE_DEVICES`. No device arg / auto-select only → `DEVICE_ENV = None` (dots.tts, Pocket TTS, Qwen3-TTS MLX), and the snapshot test must skip `device`. See "Device contract" below (docs/01 D8) |
 | Install route | PyPI or git-only? Does the latest **PyPI release** have every symbol the server imports? (Chatterbox's 0.1.7 lacks `MULTILINGUAL_T3_MODELS`, so only a git install works.) Extras or git-only dependencies (IndexTTS `--all-extras`, LuxTTS `linacodec`)? Drives the docstring's install line, `impl/server_<name>.md`, and whether Phase 6 is needed |
 | Torch setup | The engine pyproject's torch/torchaudio pins, `[tool.uv.sources]` index names/URLs, any `constraint-dependencies`. Is there a CUDA build for aarch64 Linux? (None before torch 2.9 / cu130.) Does the engine call `torchaudio.load`/`save`? (Moved to TorchCodec in 2.9.) Feeds Phase 6 |
 | Python version | Minor version of the engine's own venv → the env's `.python-version`, so uv reuses the cached torch wheels |
@@ -49,7 +49,8 @@ Follow the section layout of `server_chatterbox.py` exactly:
    plus "Or use the uv environment in envs/<engine>/ (python3 tools/serve.py <engine>)"
    if Phase 6 adds one (pattern: `server_chatterbox.py` docstring), usage.
 2. **Config** — `os.getenv` at **import time** (module level). Fail-fast `_validate_config()`
-   for enumerated values (device, model name).
+   for enumerated values (model name, cache dirs). The **device** value is *not* parsed
+   by hand: it goes through the shared `parse_device()` — see "Device contract" below.
 3. **Constants** — `SEED_MIN`/`SEED_MAX` (all current servers use 1–1000),
    `MIN_PROMPT_DURATION_S`, `MAX_AUDIO_B64_LEN = 10_000_000`.
 4. **`SynthesisRequest`** — `model_config = ConfigDict(extra="forbid")` (non-negotiable, D5).
@@ -75,7 +76,9 @@ Follow the section layout of `server_chatterbox.py` exactly:
    `torch.cuda.empty_cache()`.
 9. **`/capabilities` route** — `app.add_api_route("/capabilities", capabilities_endpoint(CAPABILITIES), ...)`.
 10. **Runtime** — dataclass + lazy `_get_runtime()`; `_synthesis_lock = threading.Lock()`
-    where the model has shared mutable state.
+    where the model has shared mutable state. If the server guards device availability,
+    its `_check_device_available()` runs inside `_get_runtime()` **before** the loader —
+    after the `if _runtime is None:` gate, before a single byte of checkpoint is read.
 11. **Global exception handler** → 500 with a message (copy verbatim).
 12. **Endpoints** — `/` (HTML landing page), `/health`, `/synthesize`:
     `decode_base64` → `_check_reference_audio` (header-only `sf.info`, 400s) → seed resolution →
@@ -126,6 +129,51 @@ the capabilities document never see it:
   `language` value *without erroring* — pass `languages=None`, and simply don't forward
   the value to the engine.
 
+## Device contract (docs/01 D8)
+
+The grammar of `<NAME>_DEVICE` lives once in `tts_engine_common.devices` (torch-free,
+per D7); **probing stays in the server** because only torch can answer "does this box
+have that GPU?". Four declarations, in the config block, and no hand-rolled regex,
+`startswith("cuda")`, or device-name tuple — `test_device_contract.py` fails any of those:
+
+```python
+DEVICE_ENV         = "<NAME>_DEVICE"        # None if the engine has no device knob
+DEVICE_FAMILIES    = ("cuda", "mps", "cpu") # what the ENGINE accepts — read its source
+DEVICE_ALLOW_INDEX = True                   # False if the engine can't use an ordinal
+DEVICE_SPEC        = parse_device(os.getenv(DEVICE_ENV, "cuda"),
+                                  env_var=DEVICE_ENV,
+                                  families=DEVICE_FAMILIES,
+                                  allow_index=DEVICE_ALLOW_INDEX,
+                                  note="<engine-specific reason, if index=False>")
+DEVICE             = DEVICE_SPEC.requested  # capabilities/health echo this verbatim
+DEVICE_ENGINE_RESOLVES = True               # only if the engine picks/falls back itself
+```
+
+- `DEVICE_FAMILIES` is the *engine's* capability, never an aspirational list: a family
+  no engine can serve is a family the operator can only get wrong (only IndexTTS
+  declares `xpu`; the CUDA-only engines declare `("cuda",)`).
+- `DEVICE_ALLOW_INDEX = False` **requires** a `note=` in the parse call and a
+  `CUDA_VISIBLE_DEVICES` line in the module docstring, both asserted by the contract
+  test. Get the evidence from the vendored engine before choosing either way —
+  KittenTTS's `if self.device != "cuda": return "cpu"` and LuxTTS's
+  `torch.device(device, 0)` are why those two refuse `cuda:1`.
+- The existence guard is a one-liner in the server, at **model load** (never import:
+  `_bootstrap.py` pins `*_DEVICE=cuda` against a stub torch that reports no GPU, and
+  import-time probing would take `/capabilities` down with it):
+
+  ```python
+  def _check_device_available() -> None:
+      require_cuda_available(DEVICE_SPEC, env_var=DEVICE_ENV,
+                             is_available=torch.cuda.is_available,
+                             device_count=torch.cuda.device_count)
+  ```
+
+  `DEVICE_ENGINE_RESOLVES = True` means *no* such function: the engine's own fallback
+  (LuxTTS `cuda` → `mps` → `cpu`) is a working path that a guard would turn into a
+  startup crash. The flag exists so the contract test can tell that from an oversight.
+- Never rewrite the advertised `device`: an unavailable device is a startup error, and
+  `/capabilities` keeps reporting the configured string.
+
 ## Phase 3 — Test stub: `impl/tests/stubs/<import_name>/`
 
 Import-only stand-in so the suite runs on a bare dev box:
@@ -172,14 +220,21 @@ Copy `test_server_chatterbox.py`'s structure:
 2. `impl/tests/update_snapshots.py` — add `(server_<name>, "<slug>_capabilities.json")` to `ENGINES`.
 3. `impl/tests/test_language_contract.py` — add `(server_<name>, <auto_allowed>)` to
    `SERVERS` so the shared docs/02 language-contract battery runs against the new server.
-4. Regenerate and review: `python impl/tests/update_snapshots.py`, then
+4. `impl/tests/test_versioning_contract.py` — add `server_<name>` to `SERVER_MODULES`
+   (an unwired server fails there even if its own suite passes).
+5. `impl/tests/test_device_contract.py` — add `server_<name>` to `SERVER_MODULES`.
+   A glob test fails on any `impl/server_*.py` missing from that list, so this is not
+   optional. The server must express its device posture (the four D8 declarations, or
+   `DEVICE_ENV = None` when the engine has no knob) — copy-pasting an old server's
+   device check fails here rather than in production.
+6. Regenerate and review: `python impl/tests/update_snapshots.py`, then
    `git diff impl/tests/snapshots/`. Never hand-edit a snapshot — capabilities are derived
    from the Pydantic model (D4).
-5. Add `impl/server_<name>.md` with engine notes and installation/run instructions.
+7. Add `impl/server_<name>.md` with engine notes and installation/run instructions.
    Follow the pattern of other server-specific markdown files in `impl`. If Phase 6 adds an
    env, include an "Alternative: from a local <Engine> git checkout (uv)" section after the
    pip recipe (model: `impl/server_chatterbox.md`).
-6. Docs: add link to engine-specific doc to `impl/README.md` and the root `README.md` Engines list.
+8. Docs: add link to engine-specific doc to `impl/README.md` and the root `README.md` Engines list.
    Update `AGENTS.md` which tracks a list and a count of supported engines - add known quirks
    for the new engine if relevant. Use the existing engine entries as a guide; keep it brief.
 

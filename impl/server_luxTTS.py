@@ -52,10 +52,22 @@ Configuration (environment variables):
                          ignores this variable entirely and always downloads
                          the default model — that is an upstream LuxTTS bug,
                          not a tts-serve one.
-    LUX_TTS_DEVICE       Device to load the model on.  One of: cuda, mps, cpu.
-                         Default: cuda.  Note: if 'cuda' is requested but
-                         unavailable, the engine silently falls back to MPS,
-                         then CPU.
+    LUX_TTS_DEVICE       Device to load the model on: 'cuda', 'mps', or 'cpu'.
+                         Default: cuda.  Two deliberate limits, both inherited
+                         from the engine (zipvoice):
+                         - 'cuda:<index>' is NOT accepted.  The loader builds
+                           its device as torch.device(device, 0)
+                           (zipvoice/modeling_utils.py), so an ordinal in the
+                           string is dead weight at best and an outright
+                           torch error at worst.  Pin a GPU with
+                           CUDA_VISIBLE_DEVICES=1 instead.
+                         - availability is the engine's decision, not this
+                           server's: if 'cuda' is requested but unavailable it
+                           falls back to MPS, then CPU (luxvoice.py) -- the
+                           runtime echoes that resolved device, so a CPU box
+                           still works with the default value.
+                         The shared grammar (docs/01 D8) is still checked at
+                         import time, so a typo fails before any download.
     LUX_TTS_THREADS      CPU ONNX thread count (CPU device only).
                          Default: 4
     LUX_TTS_HOST         Bind host for `python server_luxTTS.py`.
@@ -115,6 +127,7 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
     temp_audio_dir,
     validate_language_code,
     write_temp_audio,
@@ -124,19 +137,40 @@ from tts_engine_common import (
 # Configuration
 # ---------------------------------------------------------------------------
 
-SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
-
 MODEL_NAME_OR_PATH = os.getenv("LUX_TTS_MODEL", "YatharthS/LuxTTS")
-DEVICE = os.getenv("LUX_TTS_DEVICE", "cuda")
+DEVICE_ENV = "LUX_TTS_DEVICE"
+DEVICE = os.getenv(DEVICE_ENV, "cuda")
 THREADS = int(os.getenv("LUX_TTS_THREADS", "4"))
+
+# What this engine can serve; grammar rules are shared (docs/01 D8) and this
+# replaces the old membership tuple.
+#
+# No 'cuda:<index>', and this is measured, not caution: the engine loads with
+# `params.device = torch.device(device, 0)` (zipvoice/modeling_utils.py), which
+# hard-codes the ordinal, and its device fallback test is `if device == 'cuda'`
+# (zipvoice/luxvoice.py).  Accepting 'cuda:1' here would therefore either die
+# inside torch or silently put the model on GPU 0 while the response claims
+# GPU 1.  CUDA_VISIBLE_DEVICES is the way to pick a GPU for this engine.
+DEVICE_FAMILIES = ("cuda", "mps", "cpu")
+DEVICE_ALLOW_INDEX = False
+# Availability likewise stays the engine's: luxvoice.py falls back cuda -> mps
+# -> cpu on purpose, and the runtime echoes model.device, so a server-side
+# "this box has no CUDA" guard would break a fallback that works (and make the
+# default value unusable on a CPU box).  Declared explicitly so the contract
+# test can tell "deliberately absent" from "nobody thought of it".
+DEVICE_ENGINE_RESOLVES = True
+DEVICE_SPEC = parse_device(
+    DEVICE,
+    env_var=DEVICE_ENV,
+    families=DEVICE_FAMILIES,
+    allow_index=False,
+    note="the engine pins GPU 0 (torch.device(device, 0)); pin a GPU with "
+    "CUDA_VISIBLE_DEVICES",
+)
 
 
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
-    if DEVICE not in SUPPORTED_DEVICES:
-        raise ValueError(
-            f"LUX_TTS_DEVICE must be one of {SUPPORTED_DEVICES}, got {DEVICE!r}"
-        )
     if THREADS < 1:
         raise ValueError(
             f"LUX_TTS_THREADS must be a positive integer, got {THREADS}"

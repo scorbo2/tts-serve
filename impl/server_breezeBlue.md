@@ -133,7 +133,12 @@ export BREEZEBLUE_DEVICE=cuda:1
 ```
 
 `cuda` or `cuda:<index>` are accepted — the streaming runtime has no
-CPU/MPS backend, and anything else is rejected at startup.
+CPU/MPS backend, and anything else (`cpu`, `cuda-ish`, `tpu`) is rejected at
+startup with a message naming `BREEZEBLUE_DEVICE`. An index the box does not
+have is caught too, at model load: the old `startswith("cuda")` check waved
+`cuda:5` through and the engine died somewhere inside its own device setup,
+*after* the local checkpoint scan. The refusal now names the requested ordinal
+and the number of GPUs this box exposes.
 
 ### Fast path (optional)
 

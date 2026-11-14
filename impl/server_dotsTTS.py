@@ -76,7 +76,11 @@ from tts_engine_common import (
 MODEL_NAME_OR_PATH = os.getenv("DOTS_TTS_MODEL", "rednote-hilab/dots.tts-soar")
 
 # The runtime auto-selects CUDA when available (see DotsTtsRuntime.__init__);
-# mirror its decision for the capabilities document.
+# mirror its decision for the capabilities document.  There is no device knob
+# to validate, and DEVICE_ENV = None is how this server tells the device
+# contract test (impl/tests/test_device_contract.py) that the omission is
+# deliberate rather than forgotten.
+DEVICE_ENV = None
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # The 48 kHz AudioVAE vocoder; the runtime reads it from the model config at

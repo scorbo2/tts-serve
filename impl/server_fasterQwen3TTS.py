@@ -49,6 +49,11 @@ Configuration (environment variables):
     FASTER_QWEN3TTS_DEVICE    CUDA device to load the model on: 'cuda' or
                               'cuda:N' for a specific GPU.  Must be a CUDA
                               device (the engine has no CPU/MPS backend).
+                              The shared grammar (docs/01 D8) is checked at
+                              import time -- junk is a startup ValueError, not
+                              a torch error mid-load -- and a GPU index this
+                              box does not have fails before the checkpoint is
+                              read.
                               Default: cuda
     FASTER_QWEN3TTS_HOST      Bind host for `python server_fasterQwen3TTS.py`.
                               Default: 0.0.0.0
@@ -97,6 +102,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     stage_audio,
     temp_audio_dir,
 )
@@ -106,7 +113,34 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("FASTER_QWEN3TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-DEVICE = os.getenv("FASTER_QWEN3TTS_DEVICE", "cuda")
+DEVICE_ENV = "FASTER_QWEN3TTS_DEVICE"
+DEVICE = os.getenv(DEVICE_ENV, "cuda")
+
+# CUDA-only: the CUDA-graph backend hard-rejects anything else at load.  The
+# old check was `DEVICE.startswith("cuda")` -- 'cuda-ish' passed it and torch
+# noticed later, during the load (docs/01 D8).
+DEVICE_FAMILIES = ("cuda",)
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(
+    DEVICE,
+    env_var=DEVICE_ENV,
+    families=DEVICE_FAMILIES,
+    note="faster-qwen3-tts has no CPU/MPS backend",
+)
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    The engine captures CUDA graphs for one device at load; naming a GPU this
+    box does not have must not survive until then.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 # The 12 Hz codec is tokens/s, not the waveform rate: generated audio is
 # 24 kHz (the engine infers it from the model and echoes it back in every
@@ -145,20 +179,10 @@ LANGUAGE_CODE_TO_NAME = {
 }
 LANGUAGE_CODES = tuple(LANGUAGE_CODE_TO_NAME)
 
-
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    # The CUDA-graph backend hard-rejects non-CUDA devices at load time; the
-    # prefix (rather than an exact 'cuda') also allows multi-GPU selection
-    # like 'cuda:1'.
-    if not DEVICE.startswith("cuda"):
-        raise ValueError(
-            f"FASTER_QWEN3TTS_DEVICE must be a CUDA device ('cuda' or "
-            f"'cuda:N'); faster-qwen3-tts has no CPU/MPS backend, got {DEVICE!r}"
-        )
-
-
-_validate_config()
+# The device grammar is this server's only import-time config check, and
+# parse_device() already made it (docs/01 D8): a malformed
+# FASTER_QWEN3TTS_DEVICE raised a ValueError naming the variable before this
+# module finished importing.
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -423,6 +447,7 @@ def _get_runtime() -> FasterQwen3TTSRuntime:
     """
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading faster-qwen3-tts model '%s' on device '%s' ...",
             MODEL_NAME_OR_PATH,

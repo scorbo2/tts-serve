@@ -64,13 +64,13 @@ Configuration (environment variables):
                        Default: Edge0/Audio8-TTS-Realistic-Air
     AUDIO8_TTS_DEVICE  Device to load on: 'auto' (CUDA when available, else
                        CPU), 'cpu', 'cuda', or 'cuda:<index>'.  Default: cuda.
-                       The grammar is checked at import time; a device this box
-                       cannot serve (CUDA requested without CUDA, or an index
-                       past the last GPU) fails at model load -- before the
-                       checkpoint is fetched, never after.  /health and
-                       /capabilities echo the *configured* string rather than
-                       the resolved device, so 'auto' reports as 'auto' even
-                       when it lands on CPU.
+                       The shared grammar (docs/01 D8) is checked at import
+                       time; a device this box cannot serve (CUDA requested
+                       without CUDA, or an index past the last GPU) fails at
+                       model load -- before the checkpoint is fetched, never
+                       after.  /health and /capabilities echo the *configured*
+                       string rather than the resolved device, so 'auto'
+                       reports as 'auto' even when it lands on CPU.
                        The 0.6B is a GPU model -- CPU runs (float32 only) but
                        measured RTF ~6.6 on a 24-core x86 box, i.e. six times
                        slower than real time.
@@ -102,7 +102,6 @@ import base64
 import io
 import os
 import random
-import re
 import threading
 import time
 import uuid
@@ -138,6 +137,7 @@ except ImportError as exc:
 from tts_engine_common import (
     DEFAULT_LANGUAGE,
     CoreHealthResponse,
+    DeviceSpec,
     RELEASE_VERSION,
     CoreSynthesisResponse,
     build_capabilities,
@@ -145,6 +145,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     validate_language_code,
 )
 
@@ -153,22 +155,23 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("AUDIO8_TTS_MODEL", "Edge0/Audio8-TTS-Realistic-Air")
-DEVICE = os.getenv("AUDIO8_TTS_DEVICE", "cuda")
+DEVICE_ENV = "AUDIO8_TTS_DEVICE"
+DEVICE = os.getenv(DEVICE_ENV, "cuda")
 DTYPE = os.getenv("AUDIO8_TTS_DTYPE", "auto").strip().lower()
 
-# The engine CLI's own device grammar (audio8_tts_infer.py --device).  MPS is
-# deliberately absent: the engine neither documents nor tests it.
-_DEVICE_RE = re.compile(r"^(auto|cpu|cuda(:\d+)?)$")
+# What *this engine* can serve, per the engine CLI's own --device grammar
+# (audio8_tts_infer.py).  MPS is deliberately absent: the engine neither
+# documents nor tests it.  The grammar rules themselves are shared (docs/01
+# D8) -- this declaration is capability data, not another regex copy.
+DEVICE_FAMILIES = ("auto", "cpu", "cuda")
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+
 _DTYPES = ("auto", "bfloat16", "float16", "float32")
 
 
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
-    if not _DEVICE_RE.match(DEVICE):
-        raise ValueError(
-            f"AUDIO8_TTS_DEVICE must be 'auto', 'cpu', 'cuda', or 'cuda:<index>', "
-            f"got {DEVICE!r}"
-        )
     if DTYPE not in _DTYPES:
         raise ValueError(f"AUDIO8_TTS_DTYPE must be one of {_DTYPES}, got {DTYPE!r}")
 
@@ -559,37 +562,41 @@ _runtime: Audio8Runtime | None = None
 _synthesis_lock = threading.Lock()
 
 
+def _check_device_available(spec: DeviceSpec | None = None) -> None:
+    """Raise unless this box can serve ``spec`` (default: the configured one).
+
+    Runs before any checkpoint access: torch accepts ``cuda:99`` happily and
+    ``is_available()`` only says *some* GPU exists, so without this the first
+    complaint is an AcceleratorError at ``.to(device)`` -- i.e. after the
+    checkpoint has already been downloaded and loaded, which is the exact
+    failure this server promises to catch up front.  The wording is shared
+    across servers (docs/01 D8); the probes stay here because the shared
+    package must not import torch.
+    """
+    require_cuda_available(
+        spec or DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
+
+
 def _resolve_device(value: str) -> torch.device:
     """Map the configured device onto a torch device (the engine CLI's rules)."""
-    if value == "auto":
+    spec = parse_device(value, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+    if spec.family == "auto":
         # 'auto' is a request to *choose*, not a request for CUDA, so it must
         # reach CPU when there is no GPU -- exactly the engine CLI's resolve_device.
         # Treating it as plain 'cuda' here would crash a CPU-only box at startup
         # while AUDIO8_TTS_DTYPE=auto was still promising float32 on CPU.
         resolved = "cuda" if torch.cuda.is_available() else "cpu"
     else:
-        resolved = value
+        resolved = spec.requested
 
     device = torch.device(resolved)
-    if device.type != "cuda":
-        return device
-
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            f"AUDIO8_TTS_DEVICE={value} requests CUDA, but CUDA is not available"
-        )
-
-    # torch.device accepts *any* ordinal: 'cuda:99' constructs happily, and
-    # is_available() only says some GPU exists.  Without this check the first
-    # complaint is an AcceleratorError at .to(device) -- i.e. after the
-    # checkpoint has already been downloaded and loaded, which is the exact
-    # failure this server promises to catch up front.
-    available_gpus = torch.cuda.device_count()
-    if device.index is not None and device.index >= available_gpus:
-        raise RuntimeError(
-            f"AUDIO8_TTS_DEVICE={value} asks for GPU {device.index}, but this box "
-            f"exposes {available_gpus} CUDA device(s)"
-        )
+    # The guard needs the *resolved* shape: 'auto' has no ordinal to check and
+    # must not be reported as a CUDA request, while 'cuda:9' must be.
+    _check_device_available(DeviceSpec(device.type, device.index, spec.requested))
     return device
 
 

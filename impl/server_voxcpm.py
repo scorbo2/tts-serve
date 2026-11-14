@@ -36,8 +36,11 @@ Configuration (environment variables):
     VOXCPM_DEVICE      Device to load the model on: 'auto' (engine picks --
                         CUDA preferred, then MPS, then CPU), 'cuda',
                         'cuda:<index>', 'mps', or 'cpu'.  Default: cuda.  The
-                        grammar is checked at import time; an explicit device
-                        that is unavailable fails at model load.
+                        shared grammar (docs/01 D8) is checked at import time;
+                        a CUDA request this box cannot serve (no CUDA at all,
+                        or an index past the last GPU) fails at model load --
+                        before the checkpoint is downloaded, never partway
+                        through it.
     VOXCPM_MPS_DTYPE   Override dtype for MPS only.  The engine forces
                        float32 on MPS by default because bfloat16/float16
                        cause numerical drift that breaks the diffusion loop.
@@ -65,7 +68,6 @@ import io
 import inspect
 import os
 import random
-import re
 import threading
 import time
 import uuid
@@ -107,6 +109,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     temp_audio_dir,
     validate_language_code,
     write_temp_audio,
@@ -131,24 +135,21 @@ if _MPS_DTYPE:
         )
 
 
-# The engine's device grammar (see voxcpm's resolve_runtime_device):
-# 'auto' (or unset) -> automatic selection, otherwise an explicit device,
-# optionally indexed ('cuda:1').  We check the *grammar* here, at import
-# time, so a typo fails before a model download starts; *availability* of an
-# explicit device is the engine's job at load time (it raises a clear error).
-_DEVICE_RE = re.compile(r"^(auto|cpu|mps|cuda(:\d+)?)$")
+# What this engine can serve, per voxcpm's own resolve_runtime_device: 'auto'
+# (or unset) chooses CUDA/MPS/CPU for the operator, otherwise an explicit
+# device, optionally indexed ('cuda:1').  The grammar rules are shared
+# (docs/01 D8); this declaration is engine capability, not another regex copy.
+DEVICE_ENV = "VOXCPM_DEVICE"
+DEVICE_FAMILIES = ("auto", "cpu", "mps", "cuda")
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
 
 
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    if not _DEVICE_RE.match(DEVICE):
-        raise ValueError(
-            "VOXCPM_DEVICE must be 'auto', 'cpu', 'mps', 'cuda', or "
-            f"'cuda:<index>', got {DEVICE!r}"
-        )
-
-
-_validate_config()
+# The parse above *is* this server's import-time config validation: a typo'd
+# VOXCPM_DEVICE raises a ValueError naming the variable before anything is
+# downloaded.  Availability is a separate, load-time question (see
+# _check_device_available) -- probing the box at import time would make a
+# CPU-only machine unable to even import the module for /capabilities.
 
 # VoxCPM2's AudioVAE V2 outputs 48 kHz audio (asymmetric encode/decode with
 # built-in super-resolution).  Confirmed against the engine's own
@@ -415,10 +416,28 @@ _runtime: VoxCPMRuntime | None = None
 _synthesis_lock = threading.Lock()
 
 
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    The import-time parse only proves the *spelling*; whether GPU 1 exists is
+    a question about the machine, and torch answers neither part usefully --
+    torch.device('cuda:9') constructs happily and is_available() only says
+    *some* GPU exists, so the first complaint would otherwise come from the
+    engine halfway through a download (docs/01 D8).
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
+
+
 def _get_runtime() -> VoxCPMRuntime:
     """Return the global runtime, loading the model once on first call."""
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading VoxCPM model '{}' on device '{}' (first run downloads "
             "from HuggingFace) ...",

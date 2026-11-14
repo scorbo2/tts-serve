@@ -131,7 +131,10 @@ MODEL_NAME = os.getenv("POCKET_TTS_MODEL", ENGINE_DEFAULT_MODEL)
 CONFIG = (os.getenv("POCKET_TTS_CONFIG") or "").strip() or None
 QUANTIZE = os.getenv("POCKET_TTS_QUANTIZE", "0") == "1"
 # Pocket TTS is CPU-only here (GPU is not officially supported by the engine;
-# see "Running on GPU" in https://github.com/kyutai-labs/pocket-tts).
+# see "Running on GPU" in https://github.com/kyutai-labs/pocket-tts).  With no
+# device to choose there is nothing to validate: DEVICE_ENV = None is the
+# device contract test's declaration that this server has no device knob.
+DEVICE_ENV = None
 DEVICE = "cpu"
 
 

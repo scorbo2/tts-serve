@@ -19,8 +19,17 @@ Model weights are downloaded from HuggingFace (ResembleAI/chatterbox) on
 first start.  Set HF_TOKEN in the environment if your checkpoint needs it.
 
 Configuration (environment variables):
-    CHATTERBOX_DEVICE    Device to load the model on.  One of: cuda, mps, cpu.
-                         Default: cuda
+    CHATTERBOX_DEVICE    Device to load the model on: 'cuda', 'mps', or 'cpu'.
+                         Default: cuda.  'cuda:<index>' is deliberately NOT
+                         accepted (unlike the Ming/Qwen/VoxCPM servers): the
+                         engine's device handling is family-based, so an
+                         indexed value risks a silent mismatch between the
+                         subsystems rather than selecting GPU 1.  Pin a GPU
+                         with CUDA_VISIBLE_DEVICES=1 instead.  The shared
+                         grammar (docs/01 D8) is checked at import time;
+                         whether the requested family exists is the engine
+                         loader's own decision, which this server does not
+                         pre-empt.
     CHATTERBOX_T3_MODEL  Multilingual T3 checkpoint.  One of: v2, v3
                          (aliases t3_mtl23ls_v2 / t3_mtl23ls_v3), or a custom
                          .safetensors filename.  Default: v3 (latest release).
@@ -124,6 +133,7 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
     temp_audio_dir,
     write_temp_audio,
 )
@@ -132,19 +142,37 @@ from tts_engine_common import (
 # Configuration
 # ---------------------------------------------------------------------------
 
-SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
-
-DEVICE = os.getenv("CHATTERBOX_DEVICE", "cuda")
+DEVICE_ENV = "CHATTERBOX_DEVICE"
+DEVICE = os.getenv(DEVICE_ENV, "cuda")
 T3_MODEL = os.getenv("CHATTERBOX_T3_MODEL", "v3")
 MODEL_LABEL = f"chatterbox-multilingual-{T3_MODEL}"
+
+# What this engine can serve; the grammar rules are shared (docs/01 D8) and
+# this replaces the old membership tuple.
+#
+# No 'cuda:<index>': Chatterbox takes a device *family* and its loader keys its
+# own decisions on that string, so an index here is not a documented input --
+# the failure mode of an unverifiable value is a subsystem quietly landing
+# somewhere else, which is worse than a refused start.  GPU selection is
+# CUDA_VISIBLE_DEVICES' job for this engine.
+DEVICE_FAMILIES = ("cuda", "mps", "cpu")
+DEVICE_ALLOW_INDEX = False
+# Availability stays the engine's decision: its loader picks what to do when
+# the requested family is missing, and a server-side guard would pre-empt a
+# working fallback (see impl/tests/test_device_contract.py, which requires the
+# posture to be declared rather than accidentally absent).
+DEVICE_ENGINE_RESOLVES = True
+DEVICE_SPEC = parse_device(
+    DEVICE,
+    env_var=DEVICE_ENV,
+    families=DEVICE_FAMILIES,
+    allow_index=False,
+    note="Chatterbox takes a device family; pin a GPU with CUDA_VISIBLE_DEVICES",
+)
 
 
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model download."""
-    if DEVICE not in SUPPORTED_DEVICES:
-        raise ValueError(
-            f"CHATTERBOX_DEVICE must be one of {SUPPORTED_DEVICES}, got {DEVICE!r}"
-        )
     if T3_MODEL not in MULTILINGUAL_T3_MODELS and not T3_MODEL.endswith(".safetensors"):
         raise ValueError(
             f"CHATTERBOX_T3_MODEL must be one of {sorted(MULTILINGUAL_T3_MODELS)} "

@@ -52,7 +52,11 @@ Configuration (environment variables):
     BREEZEBLUE_DEVICE      CUDA device to load the model on: 'cuda' or
                            'cuda:N' for a specific GPU.  Must be a CUDA
                            device (the streaming runtime has no
-                           CPU/MPS backend).
+                           CPU/MPS backend).  The shared grammar (docs/01 D8)
+                           is checked at import time -- junk is a startup
+                           ValueError, not a torch error mid-load -- and a
+                           GPU index this box does not have fails before the
+                           checkpoint is read.
                            Default: cuda
     BREEZEBLUE_FAST_ALL    Enable the fast (CUDA-graph) inference path for
                            all stages: better TTFA/RTF, at the cost of a
@@ -137,6 +141,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     temp_audio_dir,
     validate_language_code,
     write_temp_audio,
@@ -147,7 +153,36 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("BREEZEBLUE_MODEL", "BreezeBlue/breeze-tts-2")
-DEVICE = os.getenv("BREEZEBLUE_DEVICE", "cuda")
+DEVICE_ENV = "BREEZEBLUE_DEVICE"
+DEVICE = os.getenv(DEVICE_ENV, "cuda")
+
+# CUDA-only: the streaming runtime hard-rejects anything else at load.  The
+# old check was `DEVICE.startswith("cuda")`, which accepted 'cuda-ish' and
+# 'cuda:' and left torch to notice (docs/01 D8); this declares the engine's
+# capability and lets the shared parser hold the grammar.
+DEVICE_FAMILIES = ("cuda",)
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(
+    DEVICE,
+    env_var=DEVICE_ENV,
+    families=DEVICE_FAMILIES,
+    note="Breeze TTS 2's streaming runtime has no CPU/MPS backend",
+)
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    Grammar proves the spelling; it does not prove GPU 1 exists.  Asking
+    before load is what keeps "fail fast instead of partway through a model
+    download" true for a multi-GPU typo as well as a bad word.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 
 def _parse_fast_all(raw: str) -> bool:
@@ -184,14 +219,6 @@ MAX_AUDIO_B64_LEN = 10_000_000
 
 def _validate_config() -> None:
     """Fail fast on bad configuration instead of partway through a model load."""
-    # The streaming runtime hard-rejects non-CUDA devices at load time; the
-    # prefix (rather than an exact 'cuda') also allows multi-GPU selection
-    # like 'cuda:1'.
-    if not DEVICE.startswith("cuda"):
-        raise ValueError(
-            "BREEZEBLUE_DEVICE must be a CUDA device ('cuda' or 'cuda:N'); "
-            f"Breeze TTS 2's streaming runtime has no CPU/MPS backend, got {DEVICE!r}"
-        )
     if FAST_ALL and not FAST_CONFIG_PATH.is_file():
         # The warmup profile is part of the breeze-tts repo, so a missing
         # file means the engine packages were imported from somewhere
@@ -484,6 +511,7 @@ def _get_runtime() -> BreezeBlueRuntime:
     """Return the global runtime, loading the model once on first call."""
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading Breeze TTS 2 model '{}' on device '{}' (fast_all={}) ...",
             MODEL_NAME_OR_PATH,

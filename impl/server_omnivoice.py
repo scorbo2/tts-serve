@@ -18,8 +18,11 @@ start unless a local path is given.
 Configuration (environment variables):
     OMNIVOICE_MODEL      HuggingFace id or local path.
                          Default: k2-fsa/OmniVoice
-    OMNIVOICE_DEVICE     Device to load the model on.  One of: cuda, mps, cpu.
-                         Default: cuda
+    OMNIVOICE_DEVICE     Device to load the model on: 'cuda', 'cuda:<index>',
+                         'mps', or 'cpu'.  Default: cuda.  The shared grammar
+                         (docs/01 D8) is checked at import time; a CUDA request
+                         this box cannot serve (no CUDA at all, or an index past
+                         the last GPU) fails before the checkpoint is loaded.
     OMNIVOICE_HOST       Bind host for `python server_omnivoice.py`.
                          Default: 0.0.0.0
     OMNIVOICE_PORT       Bind port for `python server_omnivoice.py`.
@@ -68,6 +71,8 @@ from tts_engine_common import (
     compute_rtf,
     decode_base64,
     normalize_language,
+    parse_device,
+    require_cuda_available,
     validate_language_code,
 )
 
@@ -75,10 +80,32 @@ from tts_engine_common import (
 # Configuration
 # ---------------------------------------------------------------------------
 
-SUPPORTED_DEVICES = ("cuda", "mps", "cpu")
-
 MODEL_NAME_OR_PATH = os.getenv("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
-DEVICE = os.getenv("OMNIVOICE_DEVICE", "cuda")
+DEVICE_ENV = "OMNIVOICE_DEVICE"
+DEVICE = os.getenv(DEVICE_ENV, "cuda")
+
+# What this engine can serve.  Like the Qwen3-TTS server, the value goes to
+# transformers' `device_map=`, which accepts an indexed CUDA device, so GPU 1
+# is addressable (the old membership tuple made it unreachable).  Grammar
+# rules are shared (docs/01 D8).
+DEVICE_FAMILIES = ("cuda", "mps", "cpu")
+DEVICE_ALLOW_INDEX = True
+DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+
+
+def _check_device_available() -> None:
+    """Raise unless this box can serve the configured CUDA request.
+
+    Checked before the loader, not by it: the engine derives the audio
+    tokenizer and sampling rate from the loaded model, so a device the box
+    cannot serve would otherwise be discovered after the download.
+    """
+    require_cuda_available(
+        DEVICE_SPEC,
+        is_available=torch.cuda.is_available,
+        device_count=torch.cuda.device_count,
+        env_var=DEVICE_ENV,
+    )
 
 # Output sample rate is set by the audio tokenizer's feature extractor
 # (higgs-audio-v2, 24 kHz); model.sampling_rate is derived from it at load
@@ -101,16 +128,8 @@ MAX_AUDIO_B64_LEN = 10_000_000
 
 DEFAULT_PRECISION = "bfloat16"
 
-
-def _validate_config() -> None:
-    """Fail fast on bad configuration instead of partway through a model download."""
-    if DEVICE not in SUPPORTED_DEVICES:
-        raise ValueError(
-            f"OMNIVOICE_DEVICE must be one of {SUPPORTED_DEVICES}, got {DEVICE!r}"
-        )
-
-
-_validate_config()
+# (The device grammar above is this server's only import-time config check;
+# parse_device already rejected a malformed OMNIVOICE_DEVICE.)
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -336,6 +355,7 @@ def _get_runtime() -> OmniVoiceRuntime:
     """Return the global runtime, loading the model once on first call."""
     global _runtime
     if _runtime is None:
+        _check_device_available()
         logger.info(
             "Loading OmniVoice model '%s' on device '%s' (precision=%s) ...",
             MODEL_NAME_OR_PATH,

@@ -77,6 +77,20 @@ python impl/server_qwen3TTS.py
 
 export QWEN3TTS_DEVICE=mps
 python impl/server_qwen3TTS.py
+
+export QWEN3TTS_DEVICE=cuda:1
+python impl/server_qwen3TTS.py
 ```
+
+`QWEN3TTS_DEVICE` accepts `cuda`, `mps`, `cpu`, and an indexed CUDA device
+(`cuda:1`) — the value lands on transformers' `device_map=`, so a second GPU is
+addressable here. Two checks, in this order:
+
+- **Grammar**, at server start: a typo like `cuda-ish` or `tpu` is a startup
+  error naming `QWEN3TTS_DEVICE`. No weights are touched.
+- **Existence**, when the model loads: `cuda:9` on a one-GPU box is refused
+  there rather than downloading ~2 GB and failing while placing tensors. This
+  is a startup/load failure, not an HTTP error, and `GET /capabilities` keeps
+  reporting the configured string either way.
 
 
