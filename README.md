@@ -211,16 +211,7 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
   - Added support for KittenTTS 2: 1-bit 1.7B speech LM with 115 built-in
     voices and zero-shot cloning; 24 kHz; also runnable from a local engine
     checkout via `envs/kittentts/` (#60)
-  - Device selection now follows one shared contract across every server
-    (#73): the `<PREFIX>_DEVICE` string is parsed by a single torch-free
-    grammar, so typos (`cuda-ish`, `tpu`, `cuda:1:2`) stop the launch with a
-    message naming the variable, and an out-of-range `cuda:9` is refused when
-    the model loads instead of after a multi-GB download. Qwen3-TTS,
-    OmniVoice and IndexTTS-2.5 now accept an indexed GPU (`cuda:1`) their
-    engine always supported but their old allow-list refused; the CUDA-only
-    engines validate the index instead of waving `cuda:5` into the runtime.
-    Three engines that would silently mis-run an index (Chatterbox, LuxTTS,
-    KittenTTS 2) now say so and point at `CUDA_VISIBLE_DEVICES`. A padded value
-    (`AUDIO8_TTS_DEVICE=" cuda "`) is normalized once, so the string the engine
-    and `/capabilities` get is exactly the one that was validated.
-  - TODO: release notes for v1.5 release go here
+  - Cleanup: device selection follows shared contract across every server (#73)
+  - Added support for Pocket TTS: CPU-only, 24 kHz, zero-shot cloning or one
+    of the checkpoint's preset voices; per-process language via
+    `POCKET_TTS_MODEL` (#56)
