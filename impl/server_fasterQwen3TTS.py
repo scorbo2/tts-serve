@@ -114,7 +114,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("FASTER_QWEN3TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 DEVICE_ENV = "FASTER_QWEN3TTS_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # CUDA-only: the CUDA-graph backend hard-rejects anything else at load.  The
 # old check was `DEVICE.startswith("cuda")` -- 'cuda-ish' passed it and torch
@@ -122,11 +122,15 @@ DEVICE = os.getenv(DEVICE_ENV, "cuda")
 DEVICE_FAMILIES = ("cuda",)
 DEVICE_ALLOW_INDEX = True
 DEVICE_SPEC = parse_device(
-    DEVICE,
+    DEVICE_SETTING,
     env_var=DEVICE_ENV,
     families=DEVICE_FAMILIES,
     note="faster-qwen3-tts has no CPU/MPS backend",
 )
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the runtime, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _check_device_available() -> None:

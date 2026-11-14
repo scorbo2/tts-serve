@@ -112,6 +112,11 @@ _BAD_VALUES = ["tpu", "cuda-ish", "cuda:", "cuda:1:2", "cpu:0", "mps:0"]
 # Far past any GPU a box could plausibly have.
 _OUT_OF_RANGE = "cuda:99"
 
+# Legally spelled, but padded -- what an env file or a shell quoting slip
+# produces.  The grammar strips it, so the question this raises is whether the
+# *stripped* value is the one the server then uses (issue #73 review finding).
+_PADDED = " cuda "
+
 
 @pytest.fixture(params=SERVER_MODULES, ids=SERVER_IDS)
 def server_module(request):
@@ -263,7 +268,10 @@ for raw in json.loads(sys.argv[3]):
     else:
         spec = getattr(loaded, "DEVICE_SPEC", None)
         report.append({"value": raw, "imported": True,
-                       "spec": None if spec is None else [spec.family, spec.index]})
+                       "spec": None if spec is None else [spec.family, spec.index],
+                       # the string this server hands to its engine and reports
+                       # in /health + /capabilities
+                       "device": getattr(loaded, "DEVICE", None)})
 print("DEVICE-PROBE-REPORT " + json.dumps(report))
 """
 
@@ -274,7 +282,7 @@ def device_probes(server_module):
     if not _has_device_knob(server_module):
         pytest.skip("server has no device knob")
     configured = os.environ.get(server_module.DEVICE_ENV, "cuda")
-    values = [configured, *_BAD_VALUES, _OUT_OF_RANGE, "cuda:1"]
+    values = [configured, *_BAD_VALUES, _OUT_OF_RANGE, "cuda:1", _PADDED]
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -354,6 +362,27 @@ def test_indexedCudaIsAcceptedExactlyWhenDeclared(server_module, device_probes):
             "declares DEVICE_ALLOW_INDEX = False"
         )
         assert server_module.DEVICE_ENV in probe["error"], probe["error"]
+
+
+def test_whitespacePaddedDeviceValue_isStrippedInTheStringTheServerUses(
+    server_module, device_probes
+):
+    # GIVEN a device value carrying stray whitespace, which the grammar accepts
+    # on purpose (stripping is the friendly reading of an env-file slip),
+    # WHEN the server imports it,
+    # THEN the parse really sees 'cuda' AND the module-level DEVICE the server
+    # hands to its engine / reports in /health and /capabilities is the stripped
+    # string too.  Validating a normalized copy while passing the raw one to
+    # torch is the exact drift the shared grammar exists to prevent -- and a
+    # padded value would otherwise fail *inside* the model load, with a message
+    # blaming the engine for the shell's typo.
+    probe = device_probes[_PADDED]
+    assert probe["imported"], probe["error"]
+    assert probe["spec"] == ["cuda", None], probe
+    assert probe["device"] == "cuda", (
+        f"{server_module.__name__} validated 'cuda' but uses "
+        f"{probe['device']!r} downstream"
+    )
 
 
 def test_indexGrammarIsCheckedWithoutProbingTheMachine(server_module, device_probes):

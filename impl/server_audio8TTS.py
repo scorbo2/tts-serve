@@ -156,7 +156,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("AUDIO8_TTS_MODEL", "Edge0/Audio8-TTS-Realistic-Air")
 DEVICE_ENV = "AUDIO8_TTS_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 DTYPE = os.getenv("AUDIO8_TTS_DTYPE", "auto").strip().lower()
 
 # What *this engine* can serve, per the engine CLI's own --device grammar
@@ -165,7 +165,11 @@ DTYPE = os.getenv("AUDIO8_TTS_DTYPE", "auto").strip().lower()
 # D8) -- this declaration is capability data, not another regex copy.
 DEVICE_FAMILIES = ("auto", "cpu", "cuda")
 DEVICE_ALLOW_INDEX = True
-DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 _DTYPES = ("auto", "bfloat16", "float16", "float32")
 

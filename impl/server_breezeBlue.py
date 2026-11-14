@@ -154,7 +154,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("BREEZEBLUE_MODEL", "BreezeBlue/breeze-tts-2")
 DEVICE_ENV = "BREEZEBLUE_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # CUDA-only: the streaming runtime hard-rejects anything else at load.  The
 # old check was `DEVICE.startswith("cuda")`, which accepted 'cuda-ish' and
@@ -163,11 +163,15 @@ DEVICE = os.getenv(DEVICE_ENV, "cuda")
 DEVICE_FAMILIES = ("cuda",)
 DEVICE_ALLOW_INDEX = True
 DEVICE_SPEC = parse_device(
-    DEVICE,
+    DEVICE_SETTING,
     env_var=DEVICE_ENV,
     families=DEVICE_FAMILIES,
     note="Breeze TTS 2's streaming runtime has no CPU/MPS backend",
 )
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the runtime, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _check_device_available() -> None:

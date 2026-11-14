@@ -117,7 +117,7 @@ MODEL_REPO_ID = "IndexTeam/IndexTTS-2.5"
 
 MODEL_DIR = os.getenv("INDEXTTS_MODEL_DIR", "checkpoints").strip() or "checkpoints"
 DEVICE_ENV = "INDEXTTS_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "").strip()
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "").strip()
 USE_BF16 = os.getenv("INDEXTTS_USE_BF16", "").strip().lower() in ("1", "true", "yes", "on")
 USE_QWEN_EMO = os.getenv("INDEXTTS_USE_QWEN_EMO", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -168,8 +168,13 @@ _validate_config()
 DEVICE_FAMILIES = ("auto", "cpu", "cuda", "mps", "xpu")
 DEVICE_ALLOW_INDEX = True
 DEVICE_SPEC = parse_device(
-    DEVICE or "auto", env_var=DEVICE_ENV, families=DEVICE_FAMILIES
+    DEVICE_SETTING or "auto", env_var=DEVICE_ENV, families=DEVICE_FAMILIES
 )
+# Empty is a meaningful value on this server: it means "the engine picks", and
+# the loader then passes no device kwarg at all.  So DEVICE stays the (already
+# stripped) setting rather than DEVICE_SPEC.requested, which would hand the
+# engine the literal word 'auto' where it wanted a device name.
+DEVICE = DEVICE_SETTING
 
 
 def _check_device_available() -> None:

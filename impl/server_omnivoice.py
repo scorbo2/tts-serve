@@ -82,7 +82,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
 DEVICE_ENV = "OMNIVOICE_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # What this engine can serve.  Like the Qwen3-TTS server, the value goes to
 # transformers' `device_map=`, which accepts an indexed CUDA device, so GPU 1
@@ -90,7 +90,11 @@ DEVICE = os.getenv(DEVICE_ENV, "cuda")
 # rules are shared (docs/01 D8).
 DEVICE_FAMILIES = ("cuda", "mps", "cpu")
 DEVICE_ALLOW_INDEX = True
-DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (device_map=, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _check_device_available() -> None:

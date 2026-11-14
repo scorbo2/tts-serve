@@ -51,7 +51,13 @@ class DeviceSpec(NamedTuple):
     """A parsed ``<PREFIX>_DEVICE`` value: family, optional ordinal, raw text.
 
     ``requested`` keeps the operator's own spelling so an error message can
-    quote back what was asked for instead of a normalized guess.
+    quote back what was asked for instead of a normalized guess.  It is the
+    *stripped* spelling, and it is the string the caller should hand to its
+    engine and report in ``/capabilities``: the raw environment value is an
+    input to this parser, not something to reuse downstream.  A padded
+    ``" cuda "`` that passes the grammar here and then reaches torch
+    verbatim fails inside the model load, with a message that blames the
+    engine instead of the env file that caused it.
     """
 
     family: str

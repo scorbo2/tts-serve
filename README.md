@@ -220,5 +220,7 @@ supplementing it with a newer/supplemental one. This avoids code/spec drift over
     engine always supported but their old allow-list refused; the CUDA-only
     engines validate the index instead of waving `cuda:5` into the runtime.
     Three engines that would silently mis-run an index (Chatterbox, LuxTTS,
-    KittenTTS 2) now say so and point at `CUDA_VISIBLE_DEVICES`.
+    KittenTTS 2) now say so and point at `CUDA_VISIBLE_DEVICES`. A padded value
+    (`AUDIO8_TTS_DEVICE=" cuda "`) is normalized once, so the string the engine
+    and `/capabilities` get is exactly the one that was validated.
   - TODO: release notes for v1.5 release go here

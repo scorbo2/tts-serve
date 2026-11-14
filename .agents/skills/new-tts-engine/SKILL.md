@@ -138,17 +138,24 @@ have that GPU?". Four declarations, in the config block, and no hand-rolled rege
 
 ```python
 DEVICE_ENV         = "<NAME>_DEVICE"        # None if the engine has no device knob
+DEVICE_SETTING     = os.getenv(DEVICE_ENV, "cuda")   # input to the parser only
 DEVICE_FAMILIES    = ("cuda", "mps", "cpu") # what the ENGINE accepts — read its source
 DEVICE_ALLOW_INDEX = True                   # False if the engine can't use an ordinal
-DEVICE_SPEC        = parse_device(os.getenv(DEVICE_ENV, "cuda"),
+DEVICE_SPEC        = parse_device(DEVICE_SETTING,
                                   env_var=DEVICE_ENV,
                                   families=DEVICE_FAMILIES,
                                   allow_index=DEVICE_ALLOW_INDEX,
                                   note="<engine-specific reason, if index=False>")
-DEVICE             = DEVICE_SPEC.requested  # capabilities/health echo this verbatim
+DEVICE             = DEVICE_SPEC.requested  # THE string: engine, /health, /capabilities
 DEVICE_ENGINE_RESOLVES = True               # only if the engine picks/falls back itself
 ```
 
+- `DEVICE`, not `DEVICE_SETTING`, is what everything downstream reads. The parser strips
+  surrounding whitespace, so a server that keeps passing the raw env value validates
+  `"cuda"` and then hands `" cuda "` to `torch`/`device_map=` — a failure inside the
+  model load with a message blaming the engine for a shell's typo. The device contract
+  test probes exactly this (`INDEXTTS_DEVICE` is the documented exception: empty means
+  "the engine picks", and no device kwarg is forwarded at all).
 - `DEVICE_FAMILIES` is the *engine's* capability, never an aspirational list: a family
   no engine can serve is a family the operator can only get wrong (only IndexTTS
   declares `xpu`; the CUDA-only engines declare `("cuda",)`).

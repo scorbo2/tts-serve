@@ -80,7 +80,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("QWEN3TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 DEVICE_ENV = "QWEN3TTS_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # What this engine can serve.  The device lands on transformers'
 # `device_map=`, whose documented grammar includes an indexed CUDA device, so
@@ -89,7 +89,11 @@ DEVICE = os.getenv(DEVICE_ENV, "cuda")
 # siblings).  Grammar rules are shared (docs/01 D8).
 DEVICE_FAMILIES = ("cuda", "mps", "cpu")
 DEVICE_ALLOW_INDEX = True
-DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (device_map=, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _check_device_available() -> None:

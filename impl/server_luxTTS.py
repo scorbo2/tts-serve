@@ -139,7 +139,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("LUX_TTS_MODEL", "YatharthS/LuxTTS")
 DEVICE_ENV = "LUX_TTS_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 THREADS = int(os.getenv("LUX_TTS_THREADS", "4"))
 
 # What this engine can serve; grammar rules are shared (docs/01 D8) and this
@@ -160,13 +160,18 @@ DEVICE_ALLOW_INDEX = False
 # test can tell "deliberately absent" from "nobody thought of it".
 DEVICE_ENGINE_RESOLVES = True
 DEVICE_SPEC = parse_device(
-    DEVICE,
+    DEVICE_SETTING,
     env_var=DEVICE_ENV,
     families=DEVICE_FAMILIES,
     allow_index=False,
     note="the engine pins GPU 0 (torch.device(device, 0)); pin a GPU with "
     "CUDA_VISIBLE_DEVICES",
 )
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and the engine compares
+# this string to its own literals -- a padded ' cuda ' would read as neither
+# 'cuda' nor 'cpu' and pick a path nobody asked for.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _validate_config() -> None:

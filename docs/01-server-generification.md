@@ -354,12 +354,13 @@ Every server declares its device surface as data next to its other env config:
 
 ```python
 DEVICE_ENV         = "QWEN3TTS_DEVICE"      # None for engines with no knob at all
+DEVICE_SETTING     = os.getenv(DEVICE_ENV, "cuda")   # input to the parser only
 DEVICE_FAMILIES    = ("cuda", "mps", "cpu") # this engine's own device grammar
 DEVICE_ALLOW_INDEX = True                   # `<family>:<index>` accepted?
-DEVICE             = os.getenv(DEVICE_ENV, "cuda")
-DEVICE_SPEC        = parse_device(DEVICE, env_var=DEVICE_ENV,
+DEVICE_SPEC        = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV,
                                   families=DEVICE_FAMILIES)
-# capabilities/health keep reporting DEVICE -- the operator's own string:
+# capabilities/health and the engine call all read DEVICE -- the parsed
+# spelling of what the operator asked for, never the raw env value:
 DEVICE = DEVICE_SPEC.requested
 
 def _check_device_available() -> None:
@@ -373,7 +374,11 @@ def _check_device_available() -> None:
 torch — that is how a torch-free package asks a torch question, and how a test
 pins a fake GPU count without a GPU. The grammar also refuses an index on a
 family that has none: `cpu:0` and `mps:0` are grammar errors here, not a torch
-surprise halfway through a model load.)
+surprise halfway through a model load. And note which string the servers use
+afterwards: `DEVICE`, the parsed one. Stripping whitespace is deliberate —
+env files and shell quoting produce it — so validating `"cuda"` while handing
+`" cuda "` to `device_map=` would put the failure back inside the model load,
+with a message blaming the engine for the shell's typo.)
 
 Two flags keep the exceptions in the open instead of in twelve separate opinions:
 

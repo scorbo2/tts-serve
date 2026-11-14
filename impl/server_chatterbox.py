@@ -143,7 +143,7 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 DEVICE_ENV = "CHATTERBOX_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 T3_MODEL = os.getenv("CHATTERBOX_T3_MODEL", "v3")
 MODEL_LABEL = f"chatterbox-multilingual-{T3_MODEL}"
 
@@ -163,12 +163,16 @@ DEVICE_ALLOW_INDEX = False
 # posture to be declared rather than accidentally absent).
 DEVICE_ENGINE_RESOLVES = True
 DEVICE_SPEC = parse_device(
-    DEVICE,
+    DEVICE_SETTING,
     env_var=DEVICE_ENV,
     families=DEVICE_FAMILIES,
     allow_index=False,
     note="Chatterbox takes a device family; pin a GPU with CUDA_VISIBLE_DEVICES",
 )
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _validate_config() -> None:

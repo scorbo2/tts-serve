@@ -150,7 +150,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("MING3_TTS_MODEL", "inclusionAI/Ming-3.0-tts-0.5b")
 DEVICE_ENV = "MING3_TTS_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 
 def _parse_bool_env(raw: str) -> bool:
@@ -201,7 +201,11 @@ DEVICE_ALLOW_INDEX = True
 # The import-time grammar check: a malformed value raises a ValueError naming
 # MING3_TTS_DEVICE before this module finishes importing, i.e. before any
 # download starts.
-DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _check_device_available() -> None:

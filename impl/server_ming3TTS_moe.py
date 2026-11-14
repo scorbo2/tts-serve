@@ -149,7 +149,7 @@ from tts_engine_common import (
 
 MODEL_NAME_OR_PATH = os.getenv("MING3_TTS_MOE_MODEL", "inclusionAI/Ming-3.0-tts-tiny")
 DEVICE_ENV = "MING3_TTS_MOE_DEVICE"
-DEVICE = os.getenv(DEVICE_ENV, "cuda")
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # The engine enforces 44100 as part of its release-contract validation
 # (ming_tiny.task_protocol.validate_release_engine), so this constant is
@@ -196,7 +196,11 @@ DEVICE_FAMILIES = ("cuda", "cpu", "mps")
 DEVICE_ALLOW_INDEX = True
 # Import-time grammar check: a malformed value raises a ValueError naming
 # MING3_TTS_MOE_DEVICE before this module finishes importing.
-DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 def _check_device_available() -> None:

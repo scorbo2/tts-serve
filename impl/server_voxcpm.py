@@ -121,7 +121,8 @@ from tts_engine_common import (
 # ---------------------------------------------------------------------------
 
 MODEL_NAME_OR_PATH = os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2")
-DEVICE = os.getenv("VOXCPM_DEVICE", "cuda")
+DEVICE_ENV = "VOXCPM_DEVICE"
+DEVICE_SETTING = os.getenv(DEVICE_ENV, "cuda")
 
 # MPS dtype override: the engine reads VOXCPM_MPS_DTYPE internally via
 # pick_runtime_dtype() -- we validate it here only to fail fast at startup
@@ -139,10 +140,13 @@ if _MPS_DTYPE:
 # (or unset) chooses CUDA/MPS/CPU for the operator, otherwise an explicit
 # device, optionally indexed ('cuda:1').  The grammar rules are shared
 # (docs/01 D8); this declaration is engine capability, not another regex copy.
-DEVICE_ENV = "VOXCPM_DEVICE"
 DEVICE_FAMILIES = ("auto", "cpu", "mps", "cuda")
 DEVICE_ALLOW_INDEX = True
-DEVICE_SPEC = parse_device(DEVICE, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+DEVICE_SPEC = parse_device(DEVICE_SETTING, env_var=DEVICE_ENV, families=DEVICE_FAMILIES)
+# The canonical device string is what the grammar validated, not the raw env
+# value: parse_device strips surrounding whitespace, and everything downstream
+# (the loader, /health, /capabilities) must see exactly what was accepted.
+DEVICE = DEVICE_SPEC.requested
 
 
 # The parse above *is* this server's import-time config validation: a typo'd
